@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <g transform="translate(1.09, 2.34)">
+    <polygon fill="#4ead61" points="0 11.32 0 11.3 3.07 5.99 6.14 11.31 0 11.32"/>
+    <polygon fill="#e95247" points="13.82 11.31 7.68 11.31 10.75 5.99 13.82 11.31"/>
+    <polygon fill="#4984f7" points="9.98 5.32 3.84 5.32 6.91 0 9.98 5.32"/>
+    <polygon fill="#f5c142" points="3.84 5.99 9.98 5.99 6.91 11.31 3.84 5.99"/>
+  </g>
+</svg>
