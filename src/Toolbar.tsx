@@ -17,6 +17,7 @@ interface Props {
   onClearPage: () => void;
   exporting: boolean;
   onHelp: () => void;
+  onAbout: () => void;
 }
 
 function Menu({
@@ -104,6 +105,9 @@ export function Toolbar(props: Props) {
       />
 
       <div className="toolbar-group right">
+        <button className="icon-btn" onClick={props.onAbout} title="About" aria-label="About">
+          {Icons.info}
+        </button>
         <button className="icon-btn" onClick={props.onHelp} title="Help and keyboard shortcuts (?)">
           {Icons.help}
         </button>

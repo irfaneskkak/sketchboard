@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CanvasArea } from './CanvasArea';
 import { CreateCanvasModal } from './CreateCanvasModal';
+import { AboutModal } from './AboutModal';
 import type { CanvasChoice } from './CreateCanvasModal';
 import type { CanvasHandle } from './CanvasArea';
 import {
@@ -71,6 +72,7 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [toast, setToast] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [onboarding, setOnboarding] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [pagesCollapsed, setPagesCollapsed] = useState(false);
@@ -1045,6 +1047,7 @@ export default function App() {
         onClearPage={clearPage}
         exporting={exporting}
         onHelp={() => setHelpOpen(true)}
+        onAbout={() => setAboutOpen(true)}
       />
 
       <div className="main">
@@ -1149,6 +1152,8 @@ export default function App() {
       )}
 
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+
+      {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
 
       {createCanvasOpen && (
         <CreateCanvasModal onCreate={createPageFromChoice} onClose={() => setCreateCanvasOpen(false)} />

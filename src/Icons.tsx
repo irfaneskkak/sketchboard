@@ -175,6 +175,31 @@ export const Icons = {
       <circle cx="12" cy="17" r="0.5" fill="currentColor" />
     </>
   ),
+  info: svg(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v6" />
+      <circle cx="12" cy="7.5" r="0.6" fill="currentColor" />
+    </>
+  ),
+  globe: svg(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c-2.8 2.7-2.8 15.3 0 18M12 3c2.8 2.7 2.8 15.3 0 18" />
+    </>
+  ),
+  linkedin: svg(
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2.5" />
+      <path d="M7.5 10.5V17M7.5 7.4v.1M11.5 17v-6.5M11.5 13c0-1.7 1.2-2.7 2.6-2.7s2.4 1 2.4 2.9V17" />
+    </>
+  ),
+  whatsapp: svg(
+    <>
+      <path d="M12 3.5a8.5 8.5 0 00-7.3 12.8L3.5 20.5l4.3-1.1A8.5 8.5 0 1012 3.5z" />
+      <path d="M8.8 9.2c-.2 2 2.6 5.4 5 5.9l1.9-1-1.9-1.2-.9.8c-.9-.5-1.9-1.6-2.3-2.5l.9-.8-1.2-1.9z" strokeWidth="1.4" />
+    </>
+  ),
   close: svg(<path d="M6 6l12 12M18 6L6 18" />),
   chevronLeft: svg(<path d="M15 5l-7 7 7 7" />),
   chevronRight: svg(<path d="M9 5l7 7-7 7" />),
