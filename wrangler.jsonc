@@ -2,6 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sketchboard",
   "compatibility_date": "2026-07-08",
+  // Workers Builds only runs `npx wrangler deploy`; build dist/ first.
+  "build": {
+    "command": "npm run build"
+  },
   "observability": {
     "enabled": true
   },
