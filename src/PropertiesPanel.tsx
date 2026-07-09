@@ -26,6 +26,7 @@ export interface StylePatch {
   strokeVisible?: boolean;
   controlPoint?: Point | null;
   arrowType?: 'straight' | 'curved';
+  arrowHead?: 'none' | 'start' | 'end' | 'both';
 }
 
 /** Add / edit / open / copy / remove a hyperlink on the selection. */
@@ -372,6 +373,14 @@ interface Props {
   ratioLocked: boolean;
   onToggleRatioLock: () => void;
   onSetLink: (url: string | null) => void;
+  /** Image tools (Fix 1.43): enter crop mode / apply a fitting mode. */
+  onCropImage: () => void;
+  onImageFit: (mode: 'fill' | 'fit' | 'reset') => void;
+  /** Release the selected image's clipping mask (Fix 1.44). */
+  onReleaseMask: () => void;
+  /** Clip the selected image into the topmost selected shape (Fix 1.45.4
+   * menu fallback for browsers that reserve Cmd/Ctrl+7). */
+  onMakeMask: () => void;
   onSetFrameName: (id: string, name: string) => void;
   onExportFrame: (format: 'png' | 'svg' | 'pdf') => void;
   onSetFrameOrientation: (orientation: 'portrait' | 'landscape') => void;
@@ -714,6 +723,26 @@ export function PropertiesPanel(props: Props) {
         </section>
       )}
 
+      {selected.length === 1 && first?.type === 'image' && (
+        <section>
+          <h4>Image</h4>
+          <div className="btn-row">
+            <button className="chip" title="Edit which part of the image is visible (or double-click the image)" onClick={props.onCropImage}>
+              Crop
+            </button>
+            <button className="chip" title="Cover the frame, keeping aspect ratio" onClick={() => props.onImageFit('fill')}>
+              Fill
+            </button>
+            <button className="chip" title="Show the whole image inside the frame" onClick={() => props.onImageFit('fit')}>
+              Fit
+            </button>
+            <button className="chip" title="Remove the crop" onClick={() => props.onImageFit('reset')}>
+              Reset crop
+            </button>
+          </div>
+        </section>
+      )}
+
       {showFill && (
         <PaintRow
           kind="fill"
@@ -774,6 +803,42 @@ export function PropertiesPanel(props: Props) {
                 <StrokeStylePreview style={s} />
               </button>
             ))}
+          </div>
+        </section>
+      )}
+
+      {(hasSelection
+        ? selected.every((el) => el.type === 'line' || el.type === 'arrow')
+        : tool === 'line' || tool === 'arrow') && (
+        <section>
+          <h4>Arrowheads</h4>
+          <div className="btn-row">
+            {(
+              [
+                ['none', 'None'],
+                ['start', 'Start'],
+                ['end', 'End'],
+                ['both', 'Both'],
+              ] as const
+            ).map(([mode, label]) => {
+              const headOf = (el: SketchElement) =>
+                el.arrowHead ?? (el.type === 'arrow' ? 'end' : 'none');
+              const values = hasSelection
+                ? [...new Set(selected.map(headOf))]
+                : [defaults.arrowHead ?? (tool === 'arrow' ? 'end' : 'none')];
+              const active = values.length === 1 && values[0] === mode;
+              return (
+                <button
+                  key={mode}
+                  className={`chip ${active ? 'active' : ''}`}
+                  aria-pressed={active}
+                  title={`Arrowhead: ${label.toLowerCase()}`}
+                  onClick={() => onStyle({ arrowHead: mode })}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
         </section>
       )}
@@ -1027,6 +1092,20 @@ export function PropertiesPanel(props: Props) {
           <section>
             <h4>Object</h4>
             <div className="btn-row">
+              {selected.length >= 2 &&
+                selected.some((el) => el.type === 'image') &&
+                selected.some((el) =>
+                  el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond' || el.type === 'triangle'
+                ) && (
+                  <button className="chip" onClick={props.onMakeMask} title="Make clipping mask (Cmd/Ctrl+7 or Cmd/Ctrl+Shift+M)">
+                    Make clipping mask
+                  </button>
+                )}
+              {selected.length === 1 && first?.type === 'image' && first.mask && (
+                <button className="chip" onClick={props.onReleaseMask} title="Release clipping mask (Cmd/Ctrl+Alt+7 or Cmd/Ctrl+Alt+Shift+M)">
+                  Release mask
+                </button>
+              )}
               <button className="icon-btn" onClick={props.onDuplicate} title="Duplicate (Ctrl/Cmd+D or Alt+drag)">
                 {Icons.duplicate}
               </button>

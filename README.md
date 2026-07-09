@@ -63,11 +63,37 @@ workspace path contains `:` characters, which break `PATH` lookups.
   solid, dashed, and dotted stroke styles with visual previews.
 - **Rulers** — top and left measurement rulers in page points, zoom- and
   pan-aware, with the page extent highlighted.
+- **Arrowheads** — every arrow and line has an Arrowheads control (sidebar
+  segmented buttons + right-click menu with the current mode checked):
+  **None / Start / End / Both**. New arrows default to End, lines to None
+  (setting heads on a line effectively converts it), the last explicit
+  choice is remembered for newly drawn arrows, curved arrows aim heads
+  along the true Bézier tangents at each end, and the right-click menu
+  adds **Reverse direction** (swaps geometry and bindings). Heads scale
+  with stroke width, match stroke color, and export to PNG/SVG/PDF.
 - **Connectors** — arrows drawn near a shape bind to it and follow when the
   shape moves or resizes. Double-click an arrow to give it a label. Dragging an
   arrow endpoint re-binds it; dragging the arrow itself detaches it. Frames
   bind only at their border (an arrow drawn *inside* a frame stays free), and
   an arrow never binds both ends to the same element.
+- **Context-aware right-click menus** — a plain right-click (no drag)
+  opens a menu tailored to what's under the cursor: empty canvas (Paste,
+  Select all, Add frame/text/image, Zoom), frames (rename, duplicate,
+  export, add neighbors, lock, layer, delete), shapes, text (edit, font
+  stepping), images (crop, fit/fill, reset), clipping masks (edit/release),
+  lines/arrows (incl. Straighten), groups, multi-selections (group/ungroup,
+  make-mask when exactly one image + one shape above it, align,
+  distribute), locked objects (Unlock/Copy — locked elements stay
+  recoverable), and crop-edit mode (exit/fit/fill/reset). Right-clicking
+  an unselected object selects it first; empty-canvas clicks clear the
+  selection. Arrow keys + Enter navigate, Escape closes, shortcut hints
+  show on the right, and every item is a fallback for browser-blocked
+  shortcuts. The menu is **viewport-fixed and never cut off**: it's
+  measured after render and clamped inside the screen (16px margins, 40px
+  bottom safe zone for the Dock), centers itself when taller than 80% of
+  the viewport, scrolls internally on small screens, and locks body/canvas
+  scrolling while open — wheel input can't zoom or pan the canvas behind
+  it.
 - **Right-click pan** (Fix 1.27) — press and hold the right mouse button
   anywhere on the canvas to pan, regardless of the active tool; the cursor
   shows grab/grabbing and the tool is untouched on release. A right-click
@@ -96,6 +122,16 @@ workspace path contains `:` characters, which break `PATH` lookups.
   panel toggle re-enables it (Fix 1.5). `Cmd/Ctrl+Shift+>` / `<` steps the
   selected text's font size by 1px (works on standalone text, shape text,
   multi-selections, and while editing; clamped 8–120; undoable — Fix 1.23).
+- **Corner rotation zones** (Fix 1.45/1.45.1) — hover just outside any
+  corner of a selection to get a **corner-matched** rotate cursor (each of
+  the four corners shows its own orientation), then drag to rotate freely
+  around the center. Rotation is context-aware: in crop/mask **edit mode**
+  the corner zones rotate only the **image content inside the fixed mask**
+  (stored separately as `crop.rotation`, live in exports and undoable on
+  its own), while normal selection rotates the whole clipped object — single objects, lines/arrows, groups, multi-selections, frames,
+  cropped/masked images alike. Shift snaps to 15°, the live angle readout
+  and the sidebar Rotation field stay in sync, resize handles always win
+  when grabbed directly, and each drag is one undo step.
 - **Rotation & links** (Fix 1.6) — every element rotates via the handle above
   its selection frame (Shift snaps to 15° steps, live angle readout, exact
   angle input in the panel; lines/arrows/pencil bake rotation into points and
@@ -172,6 +208,63 @@ workspace path contains `:` characters, which break `PATH` lookups.
   decimals preserved (34.11 → 35.11), clamped to 1–10000, resizing live
   with one undo step per press; the ratio lock keeps the other axis in
   sync.
+- **Clipping masks** (Fix 1.44) — select an image and a closed shape
+  (rectangle incl. corner radius, ellipse, diamond, triangle) and press
+  `Cmd/Ctrl+7` — or the browser-safe **M variants** (`Cmd/Ctrl+Shift+M`,
+  `Cmd/Ctrl+Alt+Shift+M`) as fallbacks for browsers that reserve
+  Cmd+number for tab switching (Safari/Atlas), or the sidebar's
+  **Make clipping mask / Release mask** buttons and right-click actions (Fix 1.45.4). Shortcuts
+  bind at window capture level with physical-key detection and a
+  typing-field guard. Pressing `Cmd/Ctrl+7`: the topmost shape becomes a non-destructive mask and the
+  image shows only inside it, as one selectable object with the shape's
+  bounds. Double-click to reposition/scale the image inside the mask;
+  `Cmd/Ctrl+Alt+7` (or the panel's "Release mask") splits it back into the
+  original image and shape with their styles intact. Helpful toasts guide
+  invalid selections; masks survive undo/redo, duplication, frames, and
+  export to PNG/SVG (shape clipPath)/PDF. Mask **edit mode** (Fix 1.44.1)
+  makes the shape unmistakable: the full image shows dimmed with the mask
+  path as a clear bright window, a solid blue outline traces the actual
+  shape (triangle, ellipse, …), and a dotted blue rectangle marks the full
+  image bounds — so positioning the right part of the image is precise.
+- **Non-destructive image crop** (Fix 1.43) — double-click any image to
+  enter crop mode: drag the content to reposition it inside the fixed mask,
+  drag the round corner handles on the dotted content bounds to scale it
+  proportionally, or drag the square handles to resize the mask itself (the
+  content stays put). The hidden part shows as a translucent ghost; Escape,
+  Enter, or clicking outside commits. The original image is always
+  preserved — re-open crop mode anytime to reveal hidden parts, and use the
+  panel's Image section (Crop / Fill / Fit / Reset crop) for one-click
+  fitting. Crops survive resize, duplicate, undo/redo, save/import, frame
+  clipping, and export to PNG/SVG (clipPath)/PDF. Crop mode uses the
+  Figma-style UI (Fix 1.43.1): dotted blue crop boundary with thick solid
+  blue handle blocks, the outside area dimmed while the kept area stays
+  clear, and a live blue size label under the crop rectangle. The
+  Dimensions **ratio lock governs crop-content scaling** (Fix 1.44.3):
+  unlocked, the content corner handles free-transform (stretch) the image;
+  locked — or holding Shift — they scale proportionally, and the mask/crop
+  frame handles follow the same rule. **Alt/Option anchors the resize at
+  the content's center** (Fix 1.45.3) — Shift+Alt scales proportionally
+  from center, exactly like normal canvas objects, from any corner and
+  even after the content has been moved or rotated.
+- **Smart guides & measurements** (Fix 1.41) — while dragging, red
+  alignment guides appear when the selection's visual box lines up (within
+  5 screen px) with its frame's edges/centers or with sibling objects, and
+  the selection **soft-snaps** to the guide; guides vanish on release.
+  Holding **Alt/Option** enters measurement inspection (Fix 1.42): with
+  nothing selected, simply hovering an object shows its distances to its
+  parent frame's edges (no click needed); with a selection, hover
+  another object to see the gap between closest edges (hovered object
+  highlighted), hover a frame to see the selection's distances to its four
+  edges (the parent frame when the cursor is inside it), or hover empty
+  desk to fall back to the parent frame — all without dragging, updating
+  live as the cursor or a drag moves (Alt-drag duplication still works).
+  Overlays only: never saved or exported.
+- **Multi-selection member outlines** (Fix 1.44.2) — selecting two or more
+  objects shows, besides the solid group bounding box with its handles, a
+  mild blue outline on every member following its actual path: rounded
+  rectangles, ovals, triangles, diamonds, lines/arrows (incl. curves), and
+  clipping masks trace their mask shape. Indicators only — no handles —
+  and never exported.
 - **Object controls** — multi-select (marquee / shift-click), move, resize,
   duplicate (Ctrl/Cmd+D or **Alt+drag**), delete, lock, group/ungroup,
   z-order, align (6 ways), copy/paste, nudge with arrow keys.

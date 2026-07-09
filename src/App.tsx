@@ -26,11 +26,12 @@ import { PropertiesPanel } from './PropertiesPanel';
 import type { StylePatch } from './PropertiesPanel';
 import { clearSession, loadSession, saveSession } from './persistence';
 import { contrastTextColor } from './ColorPicker';
-import { ensureTextFits, hugBoxedTextHeight, isTextContainer, measureText, textBlockHeight } from './render';
+import { ensureTextFits, getImage, hugBoxedTextHeight, isTextContainer, measureText, textBlockHeight } from './render';
 import { Toolbar } from './Toolbar';
 import { ToolPanel } from './ToolPanel';
 import {
   DEFAULT_STYLE,
+  normalizeUrl,
   docIsEmpty,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
@@ -522,6 +523,234 @@ export default function App() {
       updateElements(updateBoundArrows(next), commit && gestureBaseRef.current === null);
     },
     [updateElements, startGesture]
+  );
+
+  /** Cmd/Ctrl+7 — clip the selected image into the topmost selected closed
+   * shape (Fix 1.44). Non-destructive: the shape's geometry/style move into
+   * the image's mask, releasable later. */
+  const makeClippingMask = useCallback(() => {
+    const sel = new Set(selectionRef.current);
+    const els = currentElements();
+    const chosen = els.filter((el) => sel.has(el.id) && !el.locked);
+    const images = chosen.filter((el) => el.type === 'image');
+    const CLOSED = new Set(['rectangle', 'ellipse', 'diamond', 'triangle']);
+    const shapes = chosen.filter((el) => CLOSED.has(el.type));
+    if (images.length === 0 && shapes.length === 0) return;
+    if (images.length === 0) {
+      showToast('Select an image and a shape to create a clipping mask.');
+      return;
+    }
+    if (shapes.length === 0) {
+      const hasOpen = chosen.some((el) => el.type === 'line' || el.type === 'arrow' || el.type === 'freedraw');
+      showToast(hasOpen ? 'Use a closed shape as the clipping mask.' : 'Select a closed shape above the image to use as a mask.');
+      return;
+    }
+    if (images.length > 1 || shapes.length > 1) {
+      showToast('Select one image and one closed shape to create a clipping mask.');
+      return;
+    }
+    const image = images[0];
+    const shape = shapes[0]; // topmost closed shape
+    const idxImage = els.findIndex((x) => x.id === image.id);
+    const idxShape = els.findIndex((x) => x.id === shape.id);
+    if (idxShape < idxImage) {
+      showToast('Select a closed shape above the image to use as a mask.');
+      return;
+    }
+    const c = image.crop ?? { x: 0, y: 0, w: image.width, h: image.height };
+    const contentAbs = { x: image.x + c.x, y: image.y + c.y, w: c.w, h: c.h };
+    const masked: SketchElement = {
+      ...image,
+      x: shape.x,
+      y: shape.y,
+      width: shape.width,
+      height: shape.height,
+      rotation: shape.rotation,
+      frameId: shape.frameId ?? image.frameId,
+      crop: { x: contentAbs.x - shape.x, y: contentAbs.y - shape.y, w: contentAbs.w, h: contentAbs.h },
+      mask: {
+        type: shape.type as 'rectangle' | 'ellipse' | 'diamond' | 'triangle',
+        cornerRadius: shape.cornerRadius,
+        fillColor: shape.fillColor,
+        strokeColor: shape.strokeColor,
+        strokeWidth: shape.strokeWidth,
+        strokeStyle: shape.strokeStyle,
+      },
+    };
+    // The masked image takes the shape's z-position; the plain image goes away.
+    const next = els
+      .filter((el) => el.id !== image.id)
+      .map((el) => (el.id === shape.id ? masked : el));
+    updateElements(updateBoundArrows(next), true);
+    setSelection([image.id]);
+  }, [updateElements, showToast]);
+
+  /** Cmd/Ctrl+Alt+7 — release the selected clipping mask back into a
+   * separate image and shape. */
+  const releaseClippingMask = useCallback(() => {
+    const els = currentElements();
+    const el = els.find((x) => x.id === selectionRef.current[0]);
+    if (!el || el.type !== 'image' || !el.mask || el.locked) return;
+    const c = el.crop ?? { x: 0, y: 0, w: el.width, h: el.height };
+    const img: SketchElement = {
+      ...el,
+      x: el.x + c.x,
+      y: el.y + c.y,
+      width: c.w,
+      height: c.h,
+      crop: null,
+      mask: null,
+    };
+    const shape: SketchElement = {
+      id: uid(),
+      type: el.mask.type,
+      x: el.x,
+      y: el.y,
+      width: el.width,
+      height: el.height,
+      rotation: el.rotation,
+      cornerRadius: el.mask.cornerRadius,
+      strokeColor: el.mask.strokeColor ?? 'transparent',
+      fillColor: el.mask.fillColor ?? '#D9D9D9',
+      strokeWidth: el.mask.strokeWidth ?? 2,
+      strokeStyle: el.mask.strokeStyle ?? 'solid',
+      opacity: 100,
+      seed: Math.floor(Math.random() * 2 ** 31),
+      locked: false,
+      groupId: null,
+      frameId: el.frameId,
+    };
+    const next: SketchElement[] = [];
+    for (const x of els) {
+      if (x.id === el.id) {
+        next.push(img, shape); // shape returns above the image
+      } else {
+        next.push(x);
+      }
+    }
+    updateElements(updateBoundArrows(next), true);
+    setSelection([img.id, shape.id]);
+  }, [updateElements]);
+
+  // Capture-phase, window-level binding for the clipping-mask shortcuts so
+  // they work even when the canvas isn't focused and before any other
+  // handler (Fix 1.45.4). Cmd/Ctrl+7 makes, Cmd/Ctrl+Alt+7 releases;
+  // Cmd/Ctrl+Shift+M and Cmd/Ctrl+Alt+Shift+M are browser-safe fallbacks
+  // for browsers that reserve Cmd+number for tab switching (Safari, Atlas).
+  useEffect(() => {
+    const isTypingTarget = (t: EventTarget | null): boolean =>
+      t instanceof HTMLInputElement ||
+      t instanceof HTMLTextAreaElement ||
+      (t instanceof HTMLElement && (t.isContentEditable || !!t.closest('[contenteditable="true"]')));
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const isSeven = e.key === '7' || e.code === 'Digit7' || e.keyCode === 55;
+      const isM = e.code === 'KeyM' || e.key.toLowerCase() === 'm';
+      const isPrimary = isSeven;
+      const isFallback = e.shiftKey && isM;
+      if (!isPrimary && !isFallback) return;
+      if (isTypingTarget(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.altKey) releaseClippingMask();
+      else makeClippingMask();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [makeClippingMask, releaseClippingMask]);
+
+  const cropImage = useCallback(() => {
+    const id = selectionRef.current[0];
+    if (id) canvasRef.current?.startCrop(id);
+  }, []);
+
+  /** Fill / Fit / Reset for the selected image's non-destructive crop (Fix 1.43). */
+  const imageFit = useCallback(
+    (mode: 'fill' | 'fit' | 'reset') => {
+      const id = selectionRef.current[0];
+      const el = currentElements().find((x) => x.id === id);
+      if (!el || el.type !== 'image' || el.locked) return;
+      let crop: SketchElement['crop'] = null;
+      if (mode !== 'reset' && el.imageData) {
+        const img = getImage(el.imageData);
+        if (!img || !img.naturalWidth) return;
+        const scale =
+          mode === 'fill'
+            ? Math.max(el.width / img.naturalWidth, el.height / img.naturalHeight)
+            : Math.min(el.width / img.naturalWidth, el.height / img.naturalHeight);
+        const cw = img.naturalWidth * scale;
+        const ch = img.naturalHeight * scale;
+        crop = { x: (el.width - cw) / 2, y: (el.height - ch) / 2, w: cw, h: ch };
+      }
+      updateElements(
+        currentElements().map((x) => (x.id === id ? { ...x, crop } : x)),
+        true
+      );
+    },
+    [updateElements]
+  );
+
+  /** Context-menu action dispatcher (Right Click fix): routes generic menu
+   * actions to the existing app commands. */
+  const menuAction = useCallback(
+    (action: string) => {
+      switch (action) {
+        case 'copy': copySelection(); break;
+        case 'cut': if (copySelection()) deleteSelection(); break;
+        case 'paste': pasteClipboard(); break;
+        case 'duplicate': duplicateSelection(); break;
+        case 'delete': deleteSelection(); break;
+        case 'lock': toggleLock(); break;
+        case 'group': groupSelection(); break;
+        case 'ungroup': ungroupSelection(); break;
+        case 'front': zOrder('front'); break;
+        case 'forward': zOrder('forward'); break;
+        case 'backward': zOrder('backward'); break;
+        case 'back': zOrder('back'); break;
+        case 'align-left': align('left'); break;
+        case 'align-centerX': align('centerX'); break;
+        case 'align-right': align('right'); break;
+        case 'align-top': align('top'); break;
+        case 'align-centerY': align('centerY'); break;
+        case 'align-bottom': align('bottom'); break;
+        case 'distribute-h': distribute('horizontal'); break;
+        case 'distribute-v': distribute('vertical'); break;
+        case 'fit': imageFit('fit'); break;
+        case 'fill': imageFit('fill'); break;
+        case 'reset-crop': imageFit('reset'); break;
+        case 'arrowhead-none': applyStyle({ arrowHead: 'none' }); break;
+        case 'arrowhead-start': applyStyle({ arrowHead: 'start' }); break;
+        case 'arrowhead-end': applyStyle({ arrowHead: 'end' }); break;
+        case 'arrowhead-both': applyStyle({ arrowHead: 'both' }); break;
+        case 'font-inc': stepFontSize(1); break;
+        case 'font-dec': stepFontSize(-1); break;
+        case 'select-all':
+          setSelection(currentElements().filter((el) => !el.locked).map((el) => el.id));
+          setToolState('select');
+          break;
+        case 'add-frame': setToolState('frame'); break;
+        case 'add-text': setToolState('text'); break;
+        case 'add-image': imageInputRef.current?.click(); break;
+        case 'zoom-fit': canvasRef.current?.fit(); break;
+        case 'reset-zoom': canvasRef.current?.resetZoom(); break;
+        case 'add-link': {
+          const current = currentElements().find((el) => selectionRef.current.includes(el.id) && el.link)?.link;
+          const raw = window.prompt('Link URL (leave empty to remove):', current ?? '');
+          if (raw === null) break;
+          const trimmed = raw.trim();
+          if (!trimmed) {
+            setLink(null);
+          } else {
+            const normalized = normalizeUrl(trimmed);
+            if (normalized) setLink(normalized);
+            else showToast('Enter a valid URL (https://, mailto:, tel:, or a domain).');
+          }
+          break;
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
 
   const setLink = useCallback(
@@ -1020,6 +1249,8 @@ export default function App() {
     stepFontSize,
     zOrder,
     setTool,
+    makeClippingMask,
+    releaseClippingMask,
   ]);
 
   // OS clipboard paste: images take priority, then internal element clipboard.
@@ -1097,6 +1328,9 @@ export default function App() {
             onInsertImageFiles={insertImageFiles}
             onAddPage={openCreateCanvas}
             onFrameMenuAction={frameMenuAction}
+            onMenuAction={menuAction}
+            onMakeMask={makeClippingMask}
+            onReleaseMask={releaseClippingMask}
             ratioLocked={ratioLocked}
           />
           <div className="floating-bottom">
@@ -1142,6 +1376,10 @@ export default function App() {
           ratioLocked={ratioLocked}
           onToggleRatioLock={() => setRatioLocked((v) => !v)}
           onSetLink={setLink}
+          onCropImage={cropImage}
+          onImageFit={imageFit}
+          onReleaseMask={releaseClippingMask}
+          onMakeMask={makeClippingMask}
           onSetFrameName={setFrameName}
           onExportFrame={exportSelectedFrame}
           onSetFrameOrientation={setFrameOrientation}
@@ -1229,6 +1467,9 @@ function HelpModal({ onClose }: { onClose: () => void }) {
     ['Ctrl/Cmd + A', 'Select all on page'],
     ['Ctrl/Cmd + G', 'Group (Shift to ungroup)'],
     ['Ctrl/Cmd + Shift + L', 'Lock / unlock selection'],
+    ['Ctrl/Cmd + 7 / Ctrl/Cmd + Shift + M', 'Make clipping mask (image + shape)'],
+    ['Ctrl/Cmd + Alt + 7 / Ctrl/Cmd + Alt + Shift + M', 'Release clipping mask'],
+    ['Double-click image', 'Crop / edit image'],
     ['Ctrl/Cmd + ]', 'Bring forward'],
     ['Ctrl/Cmd + [', 'Send backward'],
     [']', 'Bring to front'],

@@ -395,6 +395,9 @@ export function resizeSelectionDimensions(
       y: ty(el.y + el.height / 2) - nextHeight / 2,
       width: nextWidth,
       height: nextHeight,
+      crop: el.crop
+        ? { ...el.crop, x: el.crop.x * sx, y: el.crop.y * sy, w: el.crop.w * sx, h: el.crop.h * sy }
+        : el.crop,
     };
   });
 }

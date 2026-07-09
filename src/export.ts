@@ -9,6 +9,7 @@ import {
   LINE_HEIGHT,
   measureText,
   pageRenderBox,
+  arrowHeadsOf,
   clipFrameFor,
   renderElement,
   renderElementClipped,
@@ -162,6 +163,17 @@ function containedTextSVG(el: SketchElement): string {
   return svgTextLines(layout.lines, area.x, area.y + layout.offsetY, area.w, fontSize, textColorOf(el), el.textAlign ?? 'center');
 }
 
+/** Two <line> strokes forming an arrowhead pointing along `angle` at `to`. */
+function svgArrowhead(el: SketchElement, to: Point, angle: number): string {
+  const size = 8 + el.strokeWidth * 3;
+  let out = '';
+  for (const spread of [-1, 1]) {
+    const a = angle + Math.PI + (spread * Math.PI) / 7;
+    out += `<line x1="${to[0]}" y1="${to[1]}" x2="${to[0] + size * Math.cos(a)}" y2="${to[1] + size * Math.sin(a)}" stroke="${esc(el.strokeColor)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" />`;
+  }
+  return out;
+}
+
 function elementToSVG(el: SketchElement): string {
   const b = getBounds(el);
   const parts: string[] = [];
@@ -267,19 +279,21 @@ function elementToSVG(el: SketchElement): string {
         parts.push(
           `<path d="M ${pts[0][0]} ${pts[0][1]} Q ${cpAbs[0]} ${cpAbs[1]} ${pts[1][0]} ${pts[1][1]}" fill="none" ${strokeAttrs(el, true)} />`
         );
-        if (el.type === 'arrow') {
-          // Arrowhead follows Bézier tangent at t=1
-          const to = pts[1];
-          const dx = 2 * (to[0] - cpAbs[0]);
-          const dy = 2 * (to[1] - cpAbs[1]);
-          const angle = Math.atan2(dy, dx);
-          const size = 8 + el.strokeWidth * 3;
-          for (const spread of [-1, 1]) {
-            const a = angle + Math.PI + (spread * Math.PI) / 7;
+        {
+          const heads = arrowHeadsOf(el);
+          if (heads.end) {
+            // Arrowhead follows Bézier tangent at t=1
+            const to = pts[1];
+            parts.push(svgArrowhead(el, to, Math.atan2(2 * (to[1] - cpAbs[1]), 2 * (to[0] - cpAbs[0]))));
+          }
+          if (heads.start) {
+            // Outward along the reversed tangent at t=0
             parts.push(
-              `<line x1="${to[0]}" y1="${to[1]}" x2="${to[0] + size * Math.cos(a)}" y2="${to[1] + size * Math.sin(a)}" stroke="${esc(el.strokeColor)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" />`
+              svgArrowhead(el, pts[0], Math.atan2(-2 * (cpAbs[1] - pts[0][1]), -2 * (cpAbs[0] - pts[0][0])))
             );
           }
+        }
+        if (el.type === 'arrow') {
           // Label at Bézier midpoint
           if (el.label) {
             const t = 0.5;
@@ -297,18 +311,20 @@ function elementToSVG(el: SketchElement): string {
         parts.push(
           `<polyline points="${pts.map((p) => p.join(',')).join(' ')}" fill="none" ${strokeAttrs(el, true)} />`
         );
-        if (el.type === 'arrow') {
-          const from = pts[pts.length - 2];
-          const to = pts[pts.length - 1];
-          const angle = Math.atan2(to[1] - from[1], to[0] - from[0]);
-          const size = 8 + el.strokeWidth * 3;
-          for (const spread of [-1, 1]) {
-            const a = angle + Math.PI + (spread * Math.PI) / 7;
-            parts.push(
-              `<line x1="${to[0]}" y1="${to[1]}" x2="${to[0] + size * Math.cos(a)}" y2="${to[1] + size * Math.sin(a)}" stroke="${esc(el.strokeColor)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" />`
-            );
+        {
+          const heads = arrowHeadsOf(el);
+          if (heads.end) {
+            const from = pts[pts.length - 2];
+            const to = pts[pts.length - 1];
+            parts.push(svgArrowhead(el, to, Math.atan2(to[1] - from[1], to[0] - from[0])));
           }
+          if (heads.start) {
+            parts.push(svgArrowhead(el, pts[0], Math.atan2(pts[0][1] - pts[1][1], pts[0][0] - pts[1][0])));
+          }
+        }
+        if (el.type === 'arrow') {
           if (el.label) {
+            const to = pts[pts.length - 1];
             const mx = (pts[0][0] + to[0]) / 2;
             const my = (pts[0][1] + to[1]) / 2;
             const m = measureText(el.label, 14);
@@ -359,7 +375,43 @@ function elementToSVG(el: SketchElement): string {
     }
     case 'image':
       if (el.imageData) {
-        parts.push(`<image x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" href="${el.imageData}" />`);
+        if (el.mask) {
+          // Clipping mask (Fix 1.44): clip to the shape path.
+          const m = el.mask;
+          let shape = '';
+          if (m.type === 'ellipse') {
+            shape = `<ellipse cx="${b.x + b.w / 2}" cy="${b.y + b.h / 2}" rx="${b.w / 2}" ry="${b.h / 2}" />`;
+          } else if (m.type === 'diamond') {
+            shape = `<polygon points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h / 2} ${b.x + b.w / 2},${b.y + b.h} ${b.x},${b.y + b.h / 2}" />`;
+          } else if (m.type === 'triangle') {
+            shape = `<polygon points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" />`;
+          } else {
+            const rx = Math.min(m.cornerRadius ?? 0, Math.min(b.w, b.h) / 2);
+            shape = `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"${rx > 0 ? ` rx="${rx}"` : ''} />`;
+          }
+          const mc = el.crop ?? { x: 0, y: 0, w: b.w, h: b.h };
+          const cid = `imgmask-${el.id}`;
+          const mrot = mc.rotation
+            ? ` transform="rotate(${mc.rotation} ${b.x + mc.x + mc.w / 2} ${b.y + mc.y + mc.h / 2})"`
+            : '';
+          parts.push(
+            `<clipPath id="${esc(cid)}">${shape}</clipPath>` +
+              `<g clip-path="url(#${esc(cid)})"><image x="${b.x + mc.x}" y="${b.y + mc.y}" width="${mc.w}" height="${mc.h}" preserveAspectRatio="none"${mrot} href="${el.imageData}" /></g>`
+          );
+          break;
+        }
+        if (el.crop) {
+          const cid = `imgcrop-${el.id}`;
+          const crot = el.crop.rotation
+            ? ` transform="rotate(${el.crop.rotation} ${b.x + el.crop.x + el.crop.w / 2} ${b.y + el.crop.y + el.crop.h / 2})"`
+            : '';
+          parts.push(
+            `<clipPath id="${esc(cid)}"><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" /></clipPath>` +
+              `<g clip-path="url(#${esc(cid)})"><image x="${b.x + el.crop.x}" y="${b.y + el.crop.y}" width="${el.crop.w}" height="${el.crop.h}" preserveAspectRatio="none"${crot} href="${el.imageData}" /></g>`
+          );
+        } else {
+          parts.push(`<image x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" preserveAspectRatio="none" href="${el.imageData}" />`);
+        }
       }
       break;
     case 'embed': {

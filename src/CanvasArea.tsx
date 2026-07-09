@@ -22,6 +22,7 @@ import {
   lassoCaptures,
   normalizeRect,
   pointInBounds,
+  pointInPolygon,
   rotatePoint,
   rotationRad,
   toLocalPoint,
@@ -40,6 +41,9 @@ import {
   isTextContainer,
   measureText,
   clipFrameFor,
+  elementOutlinePath,
+  getImage,
+  maskShapePath,
   pageRenderBox,
   renderElement,
   renderElementClipped,
@@ -51,6 +55,24 @@ import { FONT_FAMILY, isInfinitePage, pageSize, randomSeed, uid } from './types'
 import type { Doc, Point, SketchElement, StyleDefaults, Tool } from './types';
 
 const ACCENT = '#4dabf7';
+
+// Corner-specific rotate cursors (Fix 1.45.1): a single arc with arrowheads
+// at both ends, oriented to wrap the hovered corner; white halo for
+// visibility. Base art wraps the top-left (nw) corner.
+const rotateCursorSvg = (deg: number) =>
+  '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">' +
+  `<g transform="rotate(${deg} 12 12)">` +
+  '<g fill="none" stroke="white" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M4 12a8 8 0 0 1 8-8"/><path d="M8.9 1.6L12.8 4l-3 2.9"/><path d="M1.6 8.9L4 12.8l2.9-3"/></g>' +
+  '<g fill="none" stroke="black" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M4 12a8 8 0 0 1 8-8"/><path d="M8.9 1.6L12.8 4l-3 2.9"/><path d="M1.6 8.9L4 12.8l2.9-3"/></g></g></svg>';
+type RotCorner = 'nw' | 'ne' | 'sw' | 'se';
+const ROTATE_CURSORS: Record<RotCorner, string> = {
+  nw: `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(rotateCursorSvg(0))}") 11 11, alias`,
+  ne: `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(rotateCursorSvg(90))}") 11 11, alias`,
+  se: `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(rotateCursorSvg(180))}") 11 11, alias`,
+  sw: `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(rotateCursorSvg(270))}") 11 11, alias`,
+};
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 5;
 const HANDLE_SCREEN_SIZE = 8;
@@ -73,6 +95,7 @@ const FRAME_PRESETS: { label: string; w: number; h: number }[] = [
 ];
 
 export interface CanvasHandle {
+  startCrop: (id: string) => void;
   fit: () => void;
   zoomBy: (factor: number) => void;
   resetZoom: () => void;
@@ -151,6 +174,10 @@ type Action =
   | { type: 'laser' }
   | { type: 'lasso'; points: Point[] }
   | { type: 'corner-radius'; id: string; origEl: SketchElement; cornerX: number; cornerY: number }
+  | { type: 'crop-move'; id: string; orig: SketchElement; startLX: number; startLY: number }
+  | { type: 'crop-scale'; id: string; orig: SketchElement; anchorX: number; anchorY: number; cornerX: number; cornerY: number }
+  | { type: 'crop-rotate'; id: string; orig: SketchElement; cx: number; cy: number; startAngle: number }
+  | { type: 'crop-frame'; id: string; orig: SketchElement; handle: Handle }
   | { type: 'bend-arrow'; id: string; origEl: SketchElement };
 
 interface Editing {
@@ -178,6 +205,12 @@ interface Props {
   onAddPage: () => void;
   /** Right-click frame menu actions; selection is already set to the frame. */
   onFrameMenuAction: (action: 'duplicate' | 'delete' | 'export-png' | 'export-pdf' | 'forward' | 'backward' | 'lock') => void;
+  onMakeMask: () => void;
+  /** Generic context-menu action dispatcher (Right Click fix): copy, paste,
+   * duplicate, delete, lock, group, z-order, align, distribute, image
+   * fit/fill/crop, link, zoom, add-element, font stepping. */
+  onMenuAction: (action: string) => void;
+  onReleaseMask: () => void;
   /** Dimensions-panel aspect-ratio lock: handle resizing stays proportional. */
   ratioLocked: boolean;
 }
@@ -198,6 +231,9 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     onInsertImageFiles,
     onAddPage,
     onFrameMenuAction,
+    onMakeMask,
+    onMenuAction,
+    onReleaseMask,
     ratioLocked,
   } = props;
 
@@ -211,6 +247,91 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   const [bindHighlight, setBindHighlight] = useState<string | null>(null);
   // Frame under a dragged selection — highlighted as the drop target (Fix 1.37).
   const [dropFrame, setDropFrame] = useState<string | null>(null);
+  // Smart alignment guides while dragging (Fix 1.41): page-space lines,
+  // overlay-only — never saved or exported.
+  const guidesRef = useRef<{
+    v: { pos: number; a: number; b: number }[];
+    h: { pos: number; a: number; b: number }[];
+  } | null>(null);
+  // Non-destructive image crop mode (Fix 1.43): id of the image being
+  // crop-edited, or null.
+  const [cropId, setCropId] = useState<string | null>(null);
+  const cropIdRef = useRef<string | null>(null);
+  cropIdRef.current = cropId;
+  // Exit crop mode on Escape/Enter (capture-phase beats the app shortcuts),
+  // on tool switch, and when the image leaves the selection.
+  useEffect(() => {
+    if (!cropId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        e.stopPropagation();
+        e.preventDefault();
+        setCropId(null);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [cropId]);
+  useEffect(() => {
+    if (cropId && (tool !== 'select' || !selection.includes(cropId))) setCropId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, selection]);
+
+  /** The image content rect for crop mode; defaults to the element box. */
+  const cropOf = (el: SketchElement) => el.crop ?? { x: 0, y: 0, w: el.width, h: el.height };
+
+  const cropRotRad = (c: { rotation?: number }) => (((c.rotation ?? 0) % 360) * Math.PI) / 180;
+
+  /** Content-rect corners in element-local space (TL, TR, BL, BR), honoring
+   * the content's own rotation (Fix 1.45.1). */
+  const cropContentCorners = (
+    el: SketchElement,
+    c: { x: number; y: number; w: number; h: number; rotation?: number }
+  ): Point[] => {
+    const pts: Point[] = [
+      [el.x + c.x, el.y + c.y],
+      [el.x + c.x + c.w, el.y + c.y],
+      [el.x + c.x, el.y + c.y + c.h],
+      [el.x + c.x + c.w, el.y + c.y + c.h],
+    ];
+    const rad = cropRotRad(c);
+    if (!rad) return pts;
+    const ctr: Point = [el.x + c.x + c.w / 2, el.y + c.y + c.h / 2];
+    return pts.map((pt) => rotatePoint(pt, ctr, rad));
+  };
+
+  // Alt/Option held: measurement inspection mode (Fix 1.41/1.42).
+  const [altHeld, setAltHeld] = useState(false);
+  const altHeldRef = useRef(false);
+  // Last pointer position in page coords; null once the cursor leaves the
+  // canvas. Drives hover-target detection for Alt measurements.
+  const pointerPageRef = useRef<Point | null>(null);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') {
+        altHeldRef.current = true;
+        setAltHeld(true);
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') {
+        altHeldRef.current = false;
+        setAltHeld(false);
+      }
+    };
+    const clear = () => {
+      altHeldRef.current = false;
+      setAltHeld(false);
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', clear);
+    };
+  }, []);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [cursor, setCursor] = useState('default');
   const [, setRedrawTick] = useState(0);
@@ -221,7 +342,95 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   const [rotationDisplay, setRotationDisplay] = useState<{ deg: number; x: number; y: number } | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [linkTip, setLinkTip] = useState<{ x: number; y: number } | null>(null);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  type CtxItem =
+    | 'div'
+    | { label: string; run: () => void; danger?: boolean; disabled?: boolean; hint?: string };
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null);
+  const [ctxActive, setCtxActive] = useState(-1);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
+  const ctxMenuOpenRef = useRef(false);
+  ctxMenuOpenRef.current = !!ctxMenu;
+  // Placement + scroll lock (Right Click Size fix): measure the real menu,
+  // keep it fully inside the viewport (16px margins, 40px bottom safe zone
+  // for the Dock), center it when very tall, and lock body scrolling while
+  // open — the menu itself may scroll internally.
+  useLayoutEffect(() => {
+    const el = ctxMenuRef.current;
+    if (!ctxMenu || !el) return;
+    const margin = 16;
+    const bottomSafe = 40;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const mw = el.offsetWidth;
+    const mh = el.offsetHeight;
+    let x = ctxMenu.x;
+    let y = ctxMenu.y;
+    if (mh > vh * 0.8) {
+      x = (vw - mw) / 2;
+      y = (vh - Math.min(mh, vh - 32)) / 2;
+    } else {
+      if (x + mw > vw - margin) x = vw - mw - margin;
+      if (y + mh > vh - bottomSafe) y = vh - mh - bottomSafe;
+      if (x < margin) x = margin;
+      if (y < margin) y = margin;
+    }
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.visibility = 'visible';
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [ctxMenu]);
+  // Keyboard navigation for the context menu (arrows / Enter / Escape).
+  useEffect(() => {
+    if (!ctxMenu) {
+      setCtxActive(-1);
+      return;
+    }
+    const enabled = ctxMenu.items
+      .map((it, i) => ({ it, i }))
+      .filter(({ it }) => it !== 'div' && !(it as { disabled?: boolean }).disabled);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.stopPropagation();
+        setCtxMenu(null);
+        return;
+      }
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setCtxActive((cur) => {
+          const pos = enabled.findIndex(({ i }) => i === cur);
+          const next =
+            ev.key === 'ArrowDown'
+              ? enabled[(pos + 1) % enabled.length]
+              : enabled[(pos - 1 + enabled.length) % enabled.length];
+          return next ? next.i : -1;
+        });
+        return;
+      }
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setCtxActive((cur) => {
+          const item = ctxMenu.items[cur];
+          if (item && item !== 'div') {
+            setCtxMenu(null);
+            (item as { run: () => void }).run();
+          }
+          return cur;
+        });
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [ctxMenu]);
+  // Close the menu when the tool changes.
+  useEffect(() => {
+    setCtxMenu(null);
+  }, [tool]);
 
   /* ------------------------------ laser pointer ----------------------------- */
 
@@ -296,6 +505,10 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   }, []);
 
   useImperativeHandle(ref, () => ({
+    startCrop: (id: string) => {
+      setSelection([id]);
+      setCropId(id);
+    },
     fit,
     zoomBy: (factor: number) => {
       const c = containerRef.current;
@@ -448,6 +661,79 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const [px, py] = toPage(clientX, clientY);
     const [hx, hy] = rotateHandlePos(frame);
     return Math.hypot(px - hx, py - hy) <= 10 / stateRef.current.view.zoom;
+  };
+
+  /** Free-rotation zones just outside the selection's corners (Fix 1.45),
+   * returning WHICH corner so the cursor can match it (Fix 1.45.1).
+   * Resize handles, endpoints, and the stem handle always win. */
+  const rotateZoneAt = (clientX: number, clientY: number): RotCorner | null => {
+    const st = stateRef.current;
+    if (st.tool !== 'select' || st.editing) return null;
+    const CORNER_KEYS: RotCorner[] = ['nw', 'ne', 'sw', 'se'];
+    const zone = 24 / st.view.zoom;
+
+    // Crop/mask edit mode: zones ring the TRANSFORMED content corners so
+    // rotation keeps working after every rotation (Fix 1.45.2) — never the
+    // stale axis-aligned bounds. Points inside the content or mask still
+    // drag/scale instead.
+    if (cropIdRef.current) {
+      const cel = getElements().find((x) => x.id === cropIdRef.current);
+      if (!cel || cel.type !== 'image' || cel.locked) return null;
+      const c = cropOf(cel);
+      const eb = getBounds(cel);
+      const rc = cropContentCorners(cel, c); // rotated TL, TR, BL, BR
+      const [px, py] = toLocalPoint(cel, ...toPage(clientX, clientY));
+      const insideContent = pointInPolygon(px, py, [rc[0], rc[1], rc[3], rc[2]]);
+      const insideMask = pointInBounds(px, py, eb);
+      if (insideContent || insideMask) return null;
+      const ctr: Point = [cel.x + c.x + c.w / 2, cel.y + c.y + c.h / 2];
+      for (let i = 0; i < 4; i++) {
+        const d = Math.hypot(px - rc[i][0], py - rc[i][1]);
+        if (d > 10 / st.view.zoom && d <= zone) {
+          // Map the cursor by the corner's current VISUAL position.
+          const world = cel.rotation
+            ? rotatePoint(rc[i], boundsCenter(eb), rotationRad(cel))
+            : rc[i];
+          const wctr = cel.rotation
+            ? rotatePoint(ctr, boundsCenter(eb), rotationRad(cel))
+            : ctr;
+          return world[0] < wctr[0]
+            ? world[1] < wctr[1] ? 'nw' : 'sw'
+            : world[1] < wctr[1] ? 'ne' : 'se';
+        }
+      }
+      return null;
+    }
+
+    const frame = selectionFrame();
+    if (!frame) return null;
+    const els = getElements().filter((e) => st.selection.includes(e.id) && !e.locked);
+    if (els.length === 0) return null;
+    if (handleAt(clientX, clientY)) return null;
+    if (rotateHandleAt(clientX, clientY)) return null;
+    if (endpointAt(clientX, clientY) !== null) return null;
+    const [px, py] = toFrameLocal(frame, ...toPage(clientX, clientY));
+    const b = frame.b;
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return null;
+    const corners: Point[] = [
+      [b.x, b.y],
+      [b.x + b.w, b.y],
+      [b.x, b.y + b.h],
+      [b.x + b.w, b.y + b.h],
+    ];
+    for (let i = 0; i < 4; i++) {
+      if (Math.hypot(px - corners[i][0], py - corners[i][1]) <= zone) {
+        if (!frame.rot) return CORNER_KEYS[i];
+        // Rotated selection: pick the icon by the corner's visual position.
+        const ctr = boundsCenter(b);
+        const world = rotatePoint(corners[i], ctr, frame.rot);
+        const wctr = rotatePoint(ctr, ctr, frame.rot);
+        return world[0] < wctr[0]
+          ? world[1] < wctr[1] ? 'nw' : 'sw'
+          : world[1] < wctr[1] ? 'ne' : 'se';
+      }
+    }
+    return null;
   };
 
   /** Badge shown on linked elements (selected or hovered): AABB top-right corner. */
@@ -651,6 +937,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       width: 0,
       height: 0,
       frameId: type === 'frame' ? null : frameAtPoint(getElements(), x, y)?.id ?? null,
+      arrowHead: type === 'arrow' ? d.arrowHead ?? 'end' : undefined,
       strokeColor: needsStroke && d.strokeColor === 'transparent' ? '#1e1e1e' : d.strokeColor,
       fillColor: type === 'sticky' ? d.stickyColor : d.fillColor,
       strokeWidth: d.strokeWidth,
@@ -884,6 +1171,97 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       return;
     }
 
+    // Image crop mode (Fix 1.43): clicks manipulate the crop; a click
+    // outside the image commits and exits.
+    if (cropIdRef.current && t === 'select') {
+      const el = getElements().find((x) => x.id === cropIdRef.current);
+      if (!el || el.type !== 'image') {
+        setCropId(null);
+      } else {
+        const [lx, ly] = toLocalPoint(el, px, py);
+        const c = cropOf(el);
+        const tolPx = 8 / stateRef.current.view.zoom;
+        // Handle hit-testing uses the ROTATED corner positions; the scale
+        // math uses the unrotated rect (pointer is unrotated during drag).
+        const rawCorners: Point[] = [
+          [el.x + c.x, el.y + c.y],
+          [el.x + c.x + c.w, el.y + c.y],
+          [el.x + c.x, el.y + c.y + c.h],
+          [el.x + c.x + c.w, el.y + c.y + c.h],
+        ];
+        const rotCorners = cropContentCorners(el, c);
+        const cornerIdx = rotCorners.findIndex(
+          ([hx, hy]) => Math.hypot(lx - hx, ly - hy) <= tolPx
+        );
+        if (cornerIdx >= 0) {
+          // Scale the image content, anchored at the opposite corner.
+          const opposite = rawCorners[3 - cornerIdx];
+          startGesture();
+          actionRef.current = {
+            type: 'crop-scale',
+            id: el.id,
+            orig: JSON.parse(JSON.stringify(el)),
+            anchorX: opposite[0],
+            anchorY: opposite[1],
+            cornerX: rawCorners[cornerIdx][0],
+            cornerY: rawCorners[cornerIdx][1],
+          };
+          return;
+        }
+        const eb = getBounds(el);
+        const positions = handlePositions(eb);
+        const frameHandle = HANDLES.find(
+          (hk) => Math.hypot(lx - positions[hk][0], ly - positions[hk][1]) <= tolPx
+        );
+        if (frameHandle) {
+          startGesture();
+          actionRef.current = {
+            type: 'crop-frame',
+            id: el.id,
+            orig: JSON.parse(JSON.stringify(el)),
+            handle: frameHandle,
+          };
+          return;
+        }
+        const insideMask = pointInBounds(lx, ly, eb);
+        const crad0 = cropRotRad(c);
+        const cctr0: Point = [el.x + c.x + c.w / 2, el.y + c.y + c.h / 2];
+        const [ulx, uly] = crad0 ? rotatePoint([lx, ly], cctr0, -crad0) : [lx, ly];
+        const insideContent =
+          ulx >= el.x + c.x && ulx <= el.x + c.x + c.w && uly >= el.y + c.y && uly <= el.y + c.y + c.h;
+        if (insideMask || insideContent) {
+          startGesture();
+          actionRef.current = {
+            type: 'crop-move',
+            id: el.id,
+            orig: JSON.parse(JSON.stringify(el)),
+            startLX: lx,
+            startLY: ly,
+          };
+          return;
+        }
+        // Just outside a corner: rotate the IMAGE CONTENT inside the fixed
+        // mask (Fix 1.45.1) — the mask/element itself does not move.
+        if (rotateZoneAt(e.clientX, e.clientY)) {
+          const ccx = el.x + c.x + c.w / 2;
+          const ccy = el.y + c.y + c.h / 2;
+          startGesture();
+          actionRef.current = {
+            type: 'crop-rotate',
+            id: el.id,
+            orig: JSON.parse(JSON.stringify(el)),
+            cx: ccx,
+            cy: ccy,
+            startAngle: Math.atan2(ly - ccy, lx - ccx),
+          };
+          return;
+        }
+        // Clicked outside: commit and leave crop mode; swallow the click.
+        setCropId(null);
+        return;
+      }
+    }
+
     if (t === 'select') {
       // A click on a link badge opens the URL instead of selecting.
       const linked = linkBadgeAt(px, py);
@@ -891,7 +1269,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         window.open(linked.link, '_blank', 'noopener');
         return;
       }
-      if (rotateHandleAt(e.clientX, e.clientY)) {
+      if (rotateHandleAt(e.clientX, e.clientY) || rotateZoneAt(e.clientX, e.clientY)) {
         const frame = selectionFrame();
         const ids = new Set(stateRef.current.selection);
         const origEls = getElements().filter((el) => ids.has(el.id) && !el.locked);
@@ -1153,9 +1531,12 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const action = actionRef.current;
     let [px, py] = toPage(e.clientX, e.clientY);
+    pointerPageRef.current = [px, py];
 
     if (!action) {
       updateHoverCursor(e.clientX, e.clientY, px, py);
+      // Alt inspection mode re-measures against whatever the cursor hovers.
+      if (altHeldRef.current) setRedrawTick((t) => t + 1);
       return;
     }
 
@@ -1222,26 +1603,99 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
           dx = Math.cos(snapAngle) * dist;
           dy = Math.sin(snapAngle) * dist;
         }
-        const orig = new Map(action.origEls.map((el) => [el.id, el]));
-        let els = getElements().map((el) => {
-          const o = orig.get(el.id);
-          if (!o || el.locked) return el;
-          return { ...el, x: o.x + dx, y: o.y + dy };
-        });
         // The pointer decides frame membership while dragging (Fix 1.39):
         // moved elements join the frame under the cursor — regardless of how
         // much of the element overlaps it — and leave when the cursor leaves.
         // Children of a frame that is itself being moved stay with their frame.
+        const all = getElements();
         const movedIds = new Set(action.origEls.map((o) => o.id));
         const hasLooseMoved = action.origEls.some(
           (o) => o.type !== 'frame' && !(o.frameId && movedIds.has(o.frameId))
         );
         const target = hasLooseMoved
           ? (() => {
-              const f = frameAtPoint(els.filter((el) => !movedIds.has(el.id)), px, py);
+              const f = frameAtPoint(all.filter((el) => !movedIds.has(el.id)), px, py);
               return f && !f.locked ? f : null;
             })()
           : null;
+
+        // Smart alignment guides + soft snapping (Fix 1.41): the dragged
+        // selection's visual box aligns to the parent frame's edges/centers
+        // and to sibling objects in that frame (5px screen threshold).
+        guidesRef.current = null;
+        {
+          const ob = boundsUnion(action.origEls.map(getAABB));
+          const candBoxes: Bounds[] = [];
+          if (target) {
+            candBoxes.push(getBounds(target));
+            for (const el of all) {
+              if (!movedIds.has(el.id) && el.type !== 'frame' && el.frameId === target.id) {
+                candBoxes.push(getAABB(el));
+              }
+            }
+          } else {
+            for (const el of all) {
+              if (movedIds.has(el.id)) continue;
+              candBoxes.push(el.type === 'frame' ? getBounds(el) : getAABB(el));
+            }
+          }
+          const tol = 5 / stateRef.current.view.zoom;
+          const stops = (o: number, len: number) => [o, o + len / 2, o + len];
+          let adjX: number | null = null;
+          let adjY: number | null = null;
+          for (const c of candBoxes) {
+            for (const cv of stops(c.x, c.w)) {
+              for (const m of stops(ob.x + dx, ob.w)) {
+                const d = cv - m;
+                if (Math.abs(d) <= tol && (adjX === null || Math.abs(d) < Math.abs(adjX))) adjX = d;
+              }
+            }
+            for (const cv of stops(c.y, c.h)) {
+              for (const m of stops(ob.y + dy, ob.h)) {
+                const d = cv - m;
+                if (Math.abs(d) <= tol && (adjY === null || Math.abs(d) < Math.abs(adjY))) adjY = d;
+              }
+            }
+          }
+          // Soft snap (skipped under Shift so the 8-direction constraint wins).
+          if (!e.shiftKey) {
+            if (adjX !== null) dx += adjX;
+            if (adjY !== null) dy += adjY;
+          }
+          const fbx = { x: ob.x + dx, y: ob.y + dy, w: ob.w, h: ob.h };
+          const v: { pos: number; a: number; b: number }[] = [];
+          const h: { pos: number; a: number; b: number }[] = [];
+          const seenV = new Set<number>();
+          const seenH = new Set<number>();
+          for (const c of candBoxes) {
+            for (const cv of stops(c.x, c.w)) {
+              if (stops(fbx.x, fbx.w).some((m) => Math.abs(cv - m) < 0.5)) {
+                const key = Math.round(cv * 10);
+                if (!seenV.has(key)) {
+                  seenV.add(key);
+                  v.push({ pos: cv, a: Math.min(fbx.y, c.y), b: Math.max(fbx.y + fbx.h, c.y + c.h) });
+                }
+              }
+            }
+            for (const cv of stops(c.y, c.h)) {
+              if (stops(fbx.y, fbx.h).some((m) => Math.abs(cv - m) < 0.5)) {
+                const key = Math.round(cv * 10);
+                if (!seenH.has(key)) {
+                  seenH.add(key);
+                  h.push({ pos: cv, a: Math.min(fbx.x, c.x), b: Math.max(fbx.x + fbx.w, c.x + c.w) });
+                }
+              }
+            }
+          }
+          if (v.length || h.length) guidesRef.current = { v, h };
+        }
+
+        const orig = new Map(action.origEls.map((el) => [el.id, el]));
+        let els = all.map((el) => {
+          const o = orig.get(el.id);
+          if (!o || el.locked) return el;
+          return { ...el, x: o.x + dx, y: o.y + dy };
+        });
         els = els.map((el) => {
           if (!movedIds.has(el.id) || el.type === 'frame') return el;
           if (el.frameId && movedIds.has(el.frameId)) return el;
@@ -1329,6 +1783,9 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
             width: o.width * sx,
             height: o.height * sy,
           };
+          if (o.crop) {
+            scaled.crop = { ...o.crop, x: o.crop.x * sx, y: o.crop.y * sy, w: o.crop.w * sx, h: o.crop.h * sy };
+          }
           if (o.points) {
             scaled.points = o.points.map(([qx, qy]) => [qx * sx, qy * sy] as Point);
           }
@@ -1398,6 +1855,105 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         setRedrawTick((t) => t + 1);
         return;
       }
+      case 'crop-move': {
+        const el = getElements().find((x) => x.id === action.id);
+        if (!el) return;
+        const [lx, ly] = toLocalPoint(action.orig, px, py);
+        const oc = action.orig.crop ?? { x: 0, y: 0, w: action.orig.width, h: action.orig.height };
+        const next = { ...el, crop: { ...oc, x: oc.x + (lx - action.startLX), y: oc.y + (ly - action.startLY) } };
+        updateElements(getElements().map((x) => (x.id === el.id ? next : x)), false);
+        return;
+      }
+      case 'crop-scale': {
+        const el = getElements().find((x) => x.id === action.id);
+        if (!el) return;
+        let [lx, ly] = toLocalPoint(action.orig, px, py);
+        {
+          // Content rotation (Fix 1.45.1): scale math runs in the content's
+          // unrotated space.
+          const oc0 = action.orig.crop ?? { x: 0, y: 0, w: action.orig.width, h: action.orig.height };
+          const crad = cropRotRad(oc0);
+          if (crad) {
+            const ctr: Point = [
+              action.orig.x + oc0.x + oc0.w / 2,
+              action.orig.y + oc0.y + oc0.h / 2,
+            ];
+            [lx, ly] = rotatePoint([lx, ly], ctr, -crad);
+          }
+        }
+        const oc = action.orig.crop ?? { x: 0, y: 0, w: action.orig.width, h: action.orig.height };
+        // Alt/Option resizes from the content CENTER (Fix 1.45.3); otherwise
+        // the opposite corner stays anchored. Checked live so the modifier
+        // can be pressed or released mid-drag.
+        const fromCenter = e.altKey;
+        const ax = fromCenter ? action.orig.x + oc.x + oc.w / 2 : action.anchorX;
+        const ay = fromCenter ? action.orig.y + oc.y + oc.h / 2 : action.anchorY;
+        const denomX = action.cornerX - ax;
+        const denomY = action.cornerY - ay;
+        const sx = denomX !== 0 ? (lx - ax) / denomX : 0;
+        const sy = denomY !== 0 ? (ly - ay) / denomY : 0;
+        // The Dimensions lock governs the content transform (Fix 1.44.3):
+        // locked (or Shift) scales proportionally, unlocked is free-form.
+        const proportional = stateRef.current.ratioLocked || e.shiftKey;
+        let scX = Math.max(0.05, sx);
+        let scY = Math.max(0.05, sy);
+        if (proportional) {
+          const sc = Math.max(0.05, Math.max(sx, sy));
+          scX = sc;
+          scY = sc;
+        }
+        const newW = oc.w * scX;
+        const newH = oc.h * scY;
+        // Keep the anchor (corner or center) fixed in element-local space.
+        const anchorLX = ax - action.orig.x;
+        const anchorLY = ay - action.orig.y;
+        const newX = anchorLX - (anchorLX - oc.x) * scX;
+        const newY = anchorLY - (anchorLY - oc.y) * scY;
+        const next = { ...el, crop: { x: newX, y: newY, w: newW, h: newH, rotation: oc.rotation } };
+        updateElements(getElements().map((x) => (x.id === el.id ? next : x)), false);
+        setRotationDisplay(null);
+        return;
+      }
+      case 'crop-rotate': {
+        const el = getElements().find((x) => x.id === action.id);
+        if (!el) return;
+        const [lx, ly] = toLocalPoint(action.orig, px, py);
+        const delta = Math.atan2(ly - action.cy, lx - action.cx) - action.startAngle;
+        const oc = action.orig.crop ?? { x: 0, y: 0, w: action.orig.width, h: action.orig.height };
+        let deg = (oc.rotation ?? 0) + (delta * 180) / Math.PI;
+        if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+        deg = ((deg % 360) + 360) % 360;
+        updateElements(
+          getElements().map((x) => (x.id === el.id ? { ...el, crop: { ...oc, rotation: deg } } : x)),
+          false
+        );
+        const v = stateRef.current.view;
+        setRotationDisplay({
+          deg: Math.round(deg),
+          x: px * v.zoom + v.offsetX + 18,
+          y: py * v.zoom + v.offsetY - 26,
+        });
+        return;
+      }
+      case 'crop-frame': {
+        const el = getElements().find((x) => x.id === action.id);
+        if (!el) return;
+        const [lx, ly] = toLocalPoint(action.orig, px, py);
+        const ob = getBounds(action.orig);
+        const nb = resizeBounds(ob, action.handle, lx, ly, e.shiftKey, false, stateRef.current.ratioLocked);
+        const oc = action.orig.crop ?? { x: 0, y: 0, w: action.orig.width, h: action.orig.height };
+        // The mask moves; the image content stays put in absolute space.
+        const next = {
+          ...el,
+          x: nb.x,
+          y: nb.y,
+          width: nb.w,
+          height: nb.h,
+          crop: { ...oc, x: action.orig.x + oc.x - nb.x, y: action.orig.y + oc.y - nb.y },
+        };
+        updateElements(updateBoundArrows(getElements().map((x) => (x.id === el.id ? next : x))), false);
+        return;
+      }
       case 'corner-radius': {
         // Compute radius from distance of pointer to the corner origin.
         const [lx, ly] = action.origEl.rotation
@@ -1440,25 +1996,276 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     }
   };
 
+  /** Context-aware right-click menu (Right Click fix): items depend on what
+   * was clicked — empty canvas, frame, shape, text, image, mask, line/arrow,
+   * group, multi-selection, locked object, or crop-edit mode. */
+  const buildContextMenu = (hit: SketchElement | null): CtxItem[] => {
+    const els = getElements();
+    const a = (action: string, label: string, extra?: Partial<Exclude<CtxItem, 'div'>>) =>
+      ({ label, run: () => onMenuAction(action), ...extra }) as Exclude<CtxItem, 'div'>;
+
+    // Crop / mask edit mode has its own compact menu.
+    if (cropIdRef.current) {
+      const cel = els.find((x) => x.id === cropIdRef.current);
+      const isMask = cel?.type === 'image' && !!cel.mask;
+      return [
+        { label: isMask ? 'Exit mask edit' : 'Exit crop mode', run: () => setCropId(null) },
+        'div',
+        a('fit', 'Fit'),
+        a('fill', 'Fill'),
+        a('reset-crop', isMask ? 'Reset image position' : 'Reset crop'),
+      ];
+    }
+
+    // Empty canvas.
+    if (!hit) {
+      return [
+        a('paste', 'Paste', { hint: '⌘V' }),
+        a('select-all', 'Select all', { hint: '⌘A' }),
+        'div',
+        a('add-frame', 'Add frame', { hint: 'F' }),
+        a('add-text', 'Add text', { hint: 'T' }),
+        a('add-image', 'Add image', { hint: 'I' }),
+        'div',
+        a('zoom-fit', 'Zoom to fit', { hint: '⌘0' }),
+        a('reset-zoom', 'Reset zoom'),
+      ];
+    }
+
+    const selIds = stateRef.current.selection;
+    const selected = els.filter((x) => selIds.includes(x.id));
+
+    // Locked object(s): only safe actions.
+    if (selected.length > 0 && selected.every((x) => x.locked)) {
+      return [
+        a('lock', 'Unlock', { hint: '⇧⌘L' }),
+        a('copy', 'Copy', { hint: '⌘C' }),
+      ];
+    }
+
+    // Frame menu.
+    if (hit.type === 'frame') {
+      return [
+        { label: 'Rename frame', run: () => beginTextEdit(hit.id, false, 'label') },
+        { label: 'Duplicate frame', run: () => onFrameMenuAction('duplicate'), hint: '⌘D' },
+        { label: 'Export frame (PNG)', run: () => onFrameMenuAction('export-png') },
+        { label: 'Export frame (PDF)', run: () => onFrameMenuAction('export-pdf') },
+        'div',
+        { label: 'Add frame above', run: () => addFrameDirectional(hit, 'top', false) },
+        { label: 'Add frame below', run: () => addFrameDirectional(hit, 'bottom', false) },
+        { label: 'Add frame left', run: () => addFrameDirectional(hit, 'left', false) },
+        { label: 'Add frame right', run: () => addFrameDirectional(hit, 'right', false) },
+        'div',
+        { label: hit.locked ? 'Unlock frame' : 'Lock frame', run: () => onFrameMenuAction('lock') },
+        'div',
+        { label: 'Bring forward', run: () => onFrameMenuAction('forward'), hint: '⌘]' },
+        { label: 'Send backward', run: () => onFrameMenuAction('backward'), hint: '⌘[' },
+        'div',
+        { label: 'Delete frame', run: () => onFrameMenuAction('delete'), danger: true },
+      ];
+    }
+
+    const CLOSED = new Set(['rectangle', 'ellipse', 'diamond', 'triangle']);
+    // Mirror makeClippingMask's rule: exactly one image plus one closed
+    // shape that sits ABOVE it.
+    const maskImgs = selected.filter((x) => x.type === 'image' && !x.mask && !x.locked);
+    const maskShps = selected.filter((x) => CLOSED.has(x.type) && !x.locked);
+    const canMakeMask =
+      maskImgs.length === 1 &&
+      maskShps.length === 1 &&
+      els.findIndex((x) => x.id === maskShps[0].id) > els.findIndex((x) => x.id === maskImgs[0].id);
+
+    const commonEdit: CtxItem[] = [
+      a('copy', 'Copy', { hint: '⌘C' }),
+      a('cut', 'Cut', { hint: '⌘X' }),
+      a('duplicate', 'Duplicate', { hint: '⌘D' }),
+    ];
+    const layerTail: CtxItem[] = [
+      'div',
+      a('front', 'Bring to front', { hint: ']' }),
+      a('forward', 'Bring forward', { hint: '⌘]' }),
+      a('backward', 'Send backward', { hint: '⌘[' }),
+      a('back', 'Send to back', { hint: '[' }),
+      'div',
+      a('lock', selected.some((x) => x.locked) ? 'Unlock' : 'Lock', { hint: '⇧⌘L' }),
+      'div',
+      a('delete', 'Delete', { danger: true, hint: '⌫' }),
+    ];
+    const linkItem = a('add-link', selected.some((x) => x.link) ? 'Edit link…' : 'Add link…');
+
+    // Multi-selection.
+    if (selected.length > 1) {
+      const allGrouped =
+        selected.every((x) => x.groupId) && new Set(selected.map((x) => x.groupId)).size === 1;
+      const items: CtxItem[] = [];
+      items.push(allGrouped ? a('ungroup', 'Ungroup', { hint: '⇧⌘G' }) : a('group', 'Group', { hint: '⌘G' }));
+      if (canMakeMask) items.push({ label: 'Make clipping mask', run: onMakeMask, hint: '⌘7' });
+      items.push('div', ...commonEdit, 'div');
+      items.push(
+        a('align-left', 'Align left'),
+        a('align-centerX', 'Align horizontal center'),
+        a('align-right', 'Align right'),
+        a('align-top', 'Align top'),
+        a('align-centerY', 'Align vertical middle'),
+        a('align-bottom', 'Align bottom'),
+        'div',
+        a('distribute-h', 'Distribute horizontally', { disabled: selected.length < 3 }),
+        a('distribute-v', 'Distribute vertically', { disabled: selected.length < 3 }),
+      );
+      items.push(...layerTail);
+      return items;
+    }
+
+    // Single element by type.
+    const items: CtxItem[] = [];
+    if (hit.type === 'image') {
+      if (hit.mask) {
+        items.push(
+          { label: 'Edit clipping mask', run: () => { setSelection([hit.id]); setCropId(hit.id); } },
+          { label: 'Release clipping mask', run: onReleaseMask, hint: '⌥⌘7' },
+          'div',
+          a('fit', 'Fit image'),
+          a('fill', 'Fill mask'),
+          a('reset-crop', 'Reset image position'),
+        );
+      } else {
+        items.push(
+          { label: hit.crop ? 'Edit crop' : 'Crop image', run: () => { setSelection([hit.id]); setCropId(hit.id); } },
+        );
+        if (hit.crop) items.push(a('reset-crop', 'Reset crop'));
+        items.push(a('fit', 'Fit'), a('fill', 'Fill'));
+      }
+      items.push('div', ...commonEdit, 'div', linkItem, ...layerTail);
+      return items;
+    }
+    if (hit.type === 'text' || (hit.text != null && hit.text !== '')) {
+      items.push(
+        { label: 'Edit text', run: () => beginTextEdit(hit.id, false) },
+        'div',
+        ...commonEdit,
+        'div',
+        a('font-inc', 'Increase font size', { hint: '⇧⌘>' }),
+        a('font-dec', 'Decrease font size', { hint: '⇧⌘<' }),
+        'div',
+        linkItem,
+        ...layerTail
+      );
+      return items;
+    }
+    if (hit.type === 'line' || hit.type === 'arrow' || hit.type === 'freedraw') {
+      items.push(...commonEdit);
+      if (hit.type === 'line' || hit.type === 'arrow') {
+        const mode = hit.arrowHead ?? (hit.type === 'arrow' ? 'end' : 'none');
+        items.push(
+          'div',
+          ...(
+            [
+              ['none', 'Arrowheads: none'],
+              ['start', 'Arrowhead at start'],
+              ['end', 'Arrowhead at end'],
+              ['both', 'Arrowheads: both'],
+            ] as const
+          ).map(([m, label]) => ({
+            label: mode === m ? `✓ ${label}` : label,
+            run: () => onMenuAction(`arrowhead-${m}`),
+          })),
+          'div',
+          {
+            label: 'Reverse direction',
+            run: () => {
+              updateElements(
+                getElements().map((x) => {
+                  if (x.id !== hit.id || !x.points || x.points.length < 2) return x;
+                  const pts = absPoints(x);
+                  const rev = [...pts].reverse();
+                  const [ax, ay] = rev[0];
+                  return {
+                    ...x,
+                    x: ax,
+                    y: ay,
+                    points: rev.map(([qx, qy]) => [qx - ax, qy - ay] as Point),
+                    controlPoint: x.controlPoint
+                      ? ([x.x + x.controlPoint[0] - ax, x.y + x.controlPoint[1] - ay] as Point)
+                      : x.controlPoint,
+                    startBinding: x.endBinding ?? null,
+                    endBinding: x.startBinding ?? null,
+                  };
+                }),
+                true
+              );
+            },
+          }
+        );
+      }
+      if (hit.controlPoint) {
+        items.push({
+          label: 'Straighten arrow',
+          run: () => {
+            updateElements(
+              getElements().map((x) =>
+                x.id === hit.id ? { ...x, controlPoint: null, arrowType: 'straight' as const } : x
+              ),
+              true
+            );
+          },
+        });
+      }
+      items.push('div', linkItem, ...layerTail);
+      return items;
+    }
+    // Shapes, stickies, embeds.
+    items.push(...commonEdit);
+    if (canMakeMask) items.push('div', { label: 'Make clipping mask', run: onMakeMask, hint: '⌘7' });
+    items.push('div', linkItem, ...layerTail);
+    return items;
+  };
+
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const action = actionRef.current;
     actionRef.current = null;
     setMarquee(null);
     setBindHighlight(null);
     setDropFrame(null);
+    guidesRef.current = null;
     if (!action) return;
     const [px, py] = toPage(e.clientX, e.clientY);
 
     switch (action.type) {
       case 'pan': {
         if (action.rightBtn && !action.moved && stateRef.current.tool === 'select') {
-          // Plain right-click (no drag): open the frame context menu.
-          const hit = selectableAt(px, py);
-          if (hit?.type === 'frame') {
-            setSelection([hit.id]);
-            const rect = containerRef.current!.getBoundingClientRect();
-            setCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, id: hit.id });
+          // Plain right-click (no drag): context-aware menu (Right Click fix).
+          let hit = cropIdRef.current ? null : selectableAt(px, py);
+          if (!hit && !cropIdRef.current) {
+            // Locked elements are skipped by normal picking but must stay
+            // recoverable through right-click: pick the topmost locked one.
+            const els2 = getElements();
+            const threshold2 = 6 / stateRef.current.view.zoom;
+            for (let i = els2.length - 1; i >= 0; i--) {
+              const el2 = els2[i];
+              if (!el2.locked) continue;
+              if (hiddenByClip(el2, px, py, els2)) continue;
+              if (hitTest(el2, px, py, threshold2)) {
+                hit = el2;
+                break;
+              }
+            }
           }
+          if (!cropIdRef.current) {
+            if (hit && !stateRef.current.selection.includes(hit.id)) {
+              setSelection(expandWithGroups(getElements(), [hit.id]));
+            } else if (!hit) {
+              setSelection([]);
+            }
+          }
+          // Build against the just-updated selection. Raw viewport coords —
+          // the placement effect measures the real menu and clamps/centers.
+          const rawX = e.clientX;
+          const rawY = e.clientY;
+          setTimeout(() => {
+            const items = buildContextMenu(hit);
+            if (items.length === 0) return;
+            setCtxMenu({ x: rawX, y: rawY, items });
+          }, 0);
         }
         if (spaceDownRef.current) setCursor('grab');
         else updateHoverCursor(e.clientX, e.clientY, px, py);
@@ -1626,6 +2433,17 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         endGesture();
         return;
       }
+      case 'crop-move':
+      case 'crop-scale':
+      case 'crop-frame': {
+        endGesture();
+        return;
+      }
+      case 'crop-rotate': {
+        setRotationDisplay(null);
+        endGesture();
+        return;
+      }
       case 'bend-arrow': {
         endGesture();
         return;
@@ -1678,6 +2496,12 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       if (interior) hit = interior;
     }
     if (hit) {
+      if (hit.type === 'image') {
+        // Enter non-destructive crop mode (Fix 1.43).
+        setSelection([hit.id]);
+        setCropId(hit.id);
+        return;
+      }
       if (hit.type === 'text' || hit.type === 'sticky' || isTextContainer(hit)) {
         beginTextEdit(hit.id, false);
         return;
@@ -1715,6 +2539,13 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     }
     const t = stateRef.current.tool;
     if (t === 'select') {
+      {
+        const rz = cropIdRef.current ? rotateZoneAt(clientX, clientY) : null;
+        if (rz) {
+          setCursor(ROTATE_CURSORS[rz]);
+          return;
+        }
+      }
       const hit = selectableAt(px, py);
       setHoveredId(hit ? hit.id : null);
       const badge = linkBadgeAt(px, py);
@@ -1747,6 +2578,13 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         setCursor(HANDLE_CURSORS[h]);
         return;
       }
+      {
+        const rz = rotateZoneAt(clientX, clientY);
+        if (rz) {
+          setCursor(ROTATE_CURSORS[rz]);
+          return;
+        }
+      }
       setCursor(hit ? 'move' : 'default');
       return;
     }
@@ -1772,6 +2610,14 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const container = containerRef.current;
     if (!container) return;
     const onWheel = (e: WheelEvent) => {
+      // While the context menu is open, the canvas must not zoom or pan;
+      // wheel input may still scroll the menu internally.
+      if (ctxMenuOpenRef.current) {
+        if (!(e.target instanceof Node && ctxMenuRef.current?.contains(e.target))) {
+          e.preventDefault();
+        }
+        return;
+      }
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
         const rect = container.getBoundingClientRect();
@@ -1917,7 +2763,9 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     // While text-editing, the editor overlay's solid outline IS the visual
     // state — no handles or selection frame on the edited element (Fix 1.35).
     const editingTextId = editing?.kind === 'text' ? editing.id : null;
-    const selEls = page.elements.filter((el) => selection.includes(el.id) && el.id !== editingTextId);
+    const selEls = page.elements.filter(
+      (el) => selection.includes(el.id) && el.id !== editingTextId && el.id !== cropId
+    );
     if (selEls.length > 0) {
       const linear =
         selEls.length === 1 &&
@@ -1925,6 +2773,29 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         selEls[0].points?.length === 2
           ? selEls[0]
           : null;
+
+      // Multi-selection: a mild blue outline on every member (Fix 1.44.2),
+      // following the actual shape/mask/linear path — indicators only, no
+      // handles. Drawn first so the main group box stays on top.
+      if (selEls.length > 1) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(24, 155, 255, 0.65)';
+        ctx.lineWidth = 1 / zoom;
+        for (const mel of selEls) {
+          ctx.save();
+          if (mel.rotation && (!mel.points || mel.points.length === 0)) {
+            const mb = getBounds(mel);
+            const [mcx2, mcy2] = boundsCenter(mb);
+            ctx.translate(mcx2, mcy2);
+            ctx.rotate(rotationRad(mel));
+            ctx.translate(-mcx2, -mcy2);
+          }
+          elementOutlinePath(ctx, mel);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.restore();
+      }
 
       // Editing frame: single elements use their own (possibly rotated) frame.
       const frameB = selEls.length === 1 ? getBounds(selEls[0]) : boundsUnion(selEls.map(getAABB));
@@ -2021,6 +2892,159 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       }
     }
 
+    // Image crop mode UI (Fix 1.43/1.43.1): full image visible with the
+    // outside-crop area dimmed, dotted blue crop boundary with thick blue
+    // crop handles, round content-scale handles, and a live size label.
+    if (cropId) {
+      const cel = page.elements.find((x) => x.id === cropId);
+      if (cel && cel.type === 'image') {
+        const CROP_BLUE = '#189BFF';
+        const c = cropOf(cel);
+        const cb = getBounds(cel);
+        const contentX = cel.x + c.x;
+        const contentY = cel.y + c.y;
+        ctx.save();
+        if (cel.rotation) {
+          const [ccx, ccy] = boundsCenter(cb);
+          ctx.translate(ccx, ccy);
+          ctx.rotate(rotationRad(cel));
+          ctx.translate(-ccx, -ccy);
+        }
+        // Full image at full opacity, then dim everything outside the kept
+        // area, so it reads as a clear window (Fix 1.43.1/1.44.1). The
+        // content may carry its own rotation (Fix 1.45.1).
+        const img = cel.imageData ? getImage(cel.imageData) : null;
+        const crad = cropRotRad(c);
+        const cctr: Point = [contentX + c.w / 2, contentY + c.h / 2];
+        const rcorners = cropContentCorners(cel, c); // TL, TR, BL, BR (rotated)
+        const contentPoly = () => {
+          ctx.moveTo(rcorners[0][0], rcorners[0][1]);
+          ctx.lineTo(rcorners[1][0], rcorners[1][1]);
+          ctx.lineTo(rcorners[3][0], rcorners[3][1]);
+          ctx.lineTo(rcorners[2][0], rcorners[2][1]);
+          ctx.closePath();
+        };
+        const drawContentImage = () => {
+          if (!img) return;
+          if (crad) {
+            ctx.save();
+            ctx.translate(cctr[0], cctr[1]);
+            ctx.rotate(crad);
+            ctx.translate(-cctr[0], -cctr[1]);
+            ctx.drawImage(img, contentX, contentY, c.w, c.h);
+            ctx.restore();
+          } else {
+            ctx.drawImage(img, contentX, contentY, c.w, c.h);
+          }
+        };
+        if (img) {
+          drawContentImage();
+          if (cel.mask) {
+            // Clipping mask: softly dim ONLY the image content itself (no
+            // big gray box — Fix 1.45.2), then re-draw it through the mask
+            // path so the actual shape is the clear, bright window.
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+            ctx.beginPath();
+            contentPoly();
+            ctx.fill();
+            ctx.save();
+            maskShapePath(ctx, cel);
+            ctx.clip();
+            drawContentImage();
+            ctx.restore();
+          } else {
+            ctx.beginPath();
+            contentPoly();
+            ctx.rect(cb.x, cb.y, cb.w, cb.h);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+            ctx.fill('evenodd');
+          }
+        }
+        // Content bounds: dotted for masked images (the full-image boundary,
+        // distinct from the solid mask outline), faint solid otherwise.
+        ctx.strokeStyle = cel.mask ? CROP_BLUE : 'rgba(24, 155, 255, 0.55)';
+        ctx.lineWidth = 1 / zoom;
+        if (cel.mask) ctx.setLineDash([2.5 / zoom, 3 / zoom]);
+        ctx.beginPath();
+        contentPoly();
+        ctx.stroke();
+        ctx.setLineDash([]);
+        for (const [hx, hy] of rcorners) {
+          ctx.beginPath();
+          ctx.arc(hx, hy, 4.5 / zoom, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+          ctx.strokeStyle = CROP_BLUE;
+          ctx.stroke();
+        }
+        if (cel.mask) {
+          // Solid blue outline following the actual mask path (Fix 1.44.1):
+          // the triangle/ellipse/… boundary stays prominent while editing.
+          maskShapePath(ctx, cel);
+          ctx.strokeStyle = CROP_BLUE;
+          ctx.lineWidth = 2 / zoom;
+          ctx.stroke();
+        } else {
+          // Dotted blue crop boundary (crop mode only — Fix 1.43.1).
+          ctx.strokeStyle = CROP_BLUE;
+          ctx.lineWidth = 1.5 / zoom;
+          ctx.setLineDash([2.5 / zoom, 3 / zoom]);
+          ctx.strokeRect(cb.x, cb.y, cb.w, cb.h);
+          ctx.setLineDash([]);
+        }
+        // Thick solid blue crop handles: 8 blocks sitting on the boundary.
+        const cpos = handlePositions(cb);
+        ctx.fillStyle = CROP_BLUE;
+        const cornerS = 13 / zoom;
+        const edgeL = 18 / zoom;
+        const edgeT = 7 / zoom;
+        const rr = 1.5 / zoom;
+        const block = (bx: number, by: number, bw: number, bh: number) => {
+          ctx.beginPath();
+          ctx.moveTo(bx + rr, by);
+          ctx.arcTo(bx + bw, by, bx + bw, by + bh, rr);
+          ctx.arcTo(bx + bw, by + bh, bx, by + bh, rr);
+          ctx.arcTo(bx, by + bh, bx, by, rr);
+          ctx.arcTo(bx, by, bx + bw, by, rr);
+          ctx.closePath();
+          ctx.fill();
+        };
+        for (const hk of HANDLES) {
+          const [hx, hy] = cpos[hk];
+          if (hk.length === 2) block(hx - cornerS / 2, hy - cornerS / 2, cornerS, cornerS);
+          else if (hk === 'n' || hk === 's') block(hx - edgeL / 2, hy - edgeT / 2, edgeL, edgeT);
+          else block(hx - edgeT / 2, hy - edgeL / 2, edgeT, edgeL);
+        }
+        // Live size label below the crop boundary.
+        {
+          const label = `${cb.w.toFixed(2)} × ${cb.h.toFixed(2)}`;
+          ctx.font = `500 ${13 / zoom}px ${FONT_FAMILY}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const tw = ctx.measureText(label).width;
+          const padX = 8 / zoom;
+          const bh2 = 22 / zoom;
+          const lx = cb.x + cb.w / 2;
+          const ly = cb.y + cb.h + 18 / zoom;
+          const bx = lx - tw / 2 - padX;
+          const by = ly - bh2 / 2;
+          const r4 = 4 / zoom;
+          ctx.fillStyle = CROP_BLUE;
+          ctx.beginPath();
+          ctx.moveTo(bx + r4, by);
+          ctx.arcTo(bx + tw + padX * 2, by, bx + tw + padX * 2, by + bh2, r4);
+          ctx.arcTo(bx + tw + padX * 2, by + bh2, bx, by + bh2, r4);
+          ctx.arcTo(bx, by + bh2, bx, by, r4);
+          ctx.arcTo(bx, by, bx + tw + padX * 2, by, r4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(label, lx, ly + 0.5 / zoom);
+        }
+        ctx.restore();
+      }
+    }
+
     // Link badges on linked elements that are selected or hovered.
     for (const el of page.elements) {
       if (!el.link) continue;
@@ -2085,6 +3109,152 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         ctx.shadowBlur = 10 / zoom;
         ctx.strokeRect(fb.x, fb.y, fb.w, fb.h);
         ctx.restore();
+      }
+    }
+
+    // Smart alignment guides (Fix 1.41) — overlay only, never exported.
+    const guides = guidesRef.current;
+    if (guides) {
+      ctx.save();
+      ctx.strokeStyle = '#FF3366';
+      ctx.lineWidth = 1 / zoom;
+      for (const g of guides.v) {
+        ctx.beginPath();
+        ctx.moveTo(g.pos, g.a);
+        ctx.lineTo(g.pos, g.b);
+        ctx.stroke();
+      }
+      for (const g of guides.h) {
+        ctx.beginPath();
+        ctx.moveTo(g.a, g.pos);
+        ctx.lineTo(g.b, g.pos);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Alt/Option measurement inspection (Fix 1.42): with a selection and
+    // Alt held, measure to whatever the cursor hovers — another object
+    // (closest-edge gaps + subtle highlight), a hovered frame's edges, or,
+    // over empty space, the selection's parent frame. Overlay only.
+    if (altHeld && !editing && tool === 'select') {
+      const els = page.elements;
+      const pp = pointerPageRef.current;
+      const threshold = 6 / zoom;
+      // Measurement source: the selection — or, with nothing selected, the
+      // object under the cursor (pure hover inspection, no click needed).
+      let sourceEls = selEls;
+      let hoverIsSource = false;
+      if (sourceEls.length === 0 && pp) {
+        for (let i = els.length - 1; i >= 0; i--) {
+          const el = els[i];
+          if (el.type === 'frame') continue;
+          if (hiddenByClip(el, pp[0], pp[1], els)) continue;
+          if (hitTest(el, pp[0], pp[1], threshold)) {
+            sourceEls = [el];
+            hoverIsSource = true;
+            break;
+          }
+        }
+      }
+      if (sourceEls.length === 0) {
+        // nothing to measure from
+      } else {
+      const sb = boundsUnion(sourceEls.map(getAABB));
+      const selIds = new Set(sourceEls.map((el) => el.id));
+
+      const drawMeasure = (x1: number, y1: number, x2: number, y2: number, val: number) => {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        const label = String(Math.round(val));
+        const lx = (x1 + x2) / 2;
+        const ly = (y1 + y2) / 2;
+        const tw = ctx.measureText(label).width;
+        const padX = 4 / zoom;
+        const bh = 15 / zoom;
+        const bx = lx - tw / 2 - padX;
+        const by = ly - bh / 2;
+        const bw = tw + padX * 2;
+        const r = 3 / zoom;
+        ctx.fillStyle = '#FF3B30';
+        ctx.beginPath();
+        ctx.moveTo(bx + r, by);
+        ctx.arcTo(bx + bw, by, bx + bw, by + bh, r);
+        ctx.arcTo(bx + bw, by + bh, bx, by + bh, r);
+        ctx.arcTo(bx, by + bh, bx, by, r);
+        ctx.arcTo(bx, by, bx + bw, by, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, lx, ly + 0.5 / zoom);
+      };
+
+      const drawFrameEdges = (fb: Bounds) => {
+        const midX = sb.x + sb.w / 2;
+        const midY = sb.y + sb.h / 2;
+        drawMeasure(fb.x, midY, sb.x, midY, sb.x - fb.x);
+        drawMeasure(sb.x + sb.w, midY, fb.x + fb.w, midY, fb.x + fb.w - (sb.x + sb.w));
+        drawMeasure(midX, fb.y, midX, sb.y, sb.y - fb.y);
+        drawMeasure(midX, sb.y + sb.h, midX, fb.y + fb.h, fb.y + fb.h - (sb.y + sb.h));
+      };
+
+      ctx.save();
+      ctx.strokeStyle = '#FF3B30';
+      ctx.lineWidth = 1 / zoom;
+      ctx.font = `600 ${11 / zoom}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Hover target under the cursor: non-source objects first, then frames.
+      // When the hover itself is the source, measure it against its frame.
+      let hovered: SketchElement | null = null;
+      if (pp && !hoverIsSource) {
+        for (let i = els.length - 1; i >= 0; i--) {
+          const el = els[i];
+          if (selIds.has(el.id) || el.type === 'frame') continue;
+          if (hiddenByClip(el, pp[0], pp[1], els)) continue;
+          if (hitTest(el, pp[0], pp[1], threshold)) {
+            hovered = el;
+            break;
+          }
+        }
+        if (!hovered) hovered = frameAtPoint(els, pp[0], pp[1]);
+      }
+
+      if (hoverIsSource) {
+        // Pure hover: outline the source and show its parent-frame gaps.
+        ctx.strokeRect(sb.x, sb.y, sb.w, sb.h);
+        const fid = sourceEls[0].frameId;
+        const srcFrame = fid ? els.find((f) => f.id === fid && f.type === 'frame') : null;
+        if (srcFrame) drawFrameEdges(getBounds(srcFrame));
+      } else if (hovered && hovered.type !== 'frame') {
+        // Object-to-object: gaps between closest edges, per axis with a gap.
+        const hb = getAABB(hovered);
+        ctx.strokeStyle = '#FF3B30';
+        ctx.strokeRect(hb.x, hb.y, hb.w, hb.h); // subtle hover highlight
+        const yMid = (Math.max(sb.y, hb.y) + Math.min(sb.y + sb.h, hb.y + hb.h)) / 2;
+        const xMid = (Math.max(sb.x, hb.x) + Math.min(sb.x + sb.w, hb.x + hb.w)) / 2;
+        const gapRight = hb.x - (sb.x + sb.w);
+        const gapLeft = sb.x - (hb.x + hb.w);
+        const gapBelow = hb.y - (sb.y + sb.h);
+        const gapAbove = sb.y - (hb.y + hb.h);
+        if (gapRight > 0) drawMeasure(sb.x + sb.w, yMid, hb.x, yMid, gapRight);
+        else if (gapLeft > 0) drawMeasure(hb.x + hb.w, yMid, sb.x, yMid, gapLeft);
+        if (gapBelow > 0) drawMeasure(xMid, sb.y + sb.h, xMid, hb.y, gapBelow);
+        else if (gapAbove > 0) drawMeasure(xMid, hb.y + hb.h, xMid, sb.y, gapAbove);
+      } else if (hovered) {
+        // Hovering a frame (its empty area or edge): measure to its edges —
+        // this covers the parent frame when the cursor is inside it.
+        drawFrameEdges(getBounds(hovered));
+      } else if (pp) {
+        // Empty canvas: fall back to the parent frame, when there is one.
+        const fid = sourceEls.find((el) => el.type !== 'frame')?.frameId;
+        const mFrame = fid ? els.find((f) => f.id === fid && f.type === 'frame') : null;
+        if (mFrame) drawFrameEdges(getBounds(mFrame));
+      }
+      ctx.restore();
       }
     }
 
@@ -2395,6 +3565,10 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerLeave={() => {
+          pointerPageRef.current = null;
+          if (altHeldRef.current) setRedrawTick((t) => t + 1);
+        }}
         onDoubleClick={onDoubleClick}
         onContextMenu={(e) => {
           // Right-click is pan (Fix 1.27); the frame context menu opens from
@@ -2413,30 +3587,35 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         </div>
       )}
       {ctxMenu && (
-        <div className="frame-context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
-          {(
-            [
-              ['Rename frame', () => beginTextEdit(ctxMenu.id, false, 'label')],
-              ['Duplicate frame', () => onFrameMenuAction('duplicate')],
-              ['Export frame (PNG)', () => onFrameMenuAction('export-png')],
-              ['Export frame (PDF)', () => onFrameMenuAction('export-pdf')],
-              ['Bring forward', () => onFrameMenuAction('forward')],
-              ['Send backward', () => onFrameMenuAction('backward')],
-              ['Lock frame', () => onFrameMenuAction('lock')],
-              ['Delete frame', () => onFrameMenuAction('delete')],
-            ] as [string, () => void][]
-          ).map(([label, fn]) => (
-            <button
-              key={label}
-              className={`menu-item ${label.startsWith('Delete') ? 'danger' : ''}`}
-              onClick={() => {
-                setCtxMenu(null);
-                fn();
-              }}
-            >
-              {label}
-            </button>
-          ))}
+        <div
+          className="context-menu"
+          role="menu"
+          aria-label="Context menu"
+          ref={ctxMenuRef}
+          style={{ left: ctxMenu.x, top: ctxMenu.y, visibility: 'hidden' }}
+          onContextMenu={(ev) => ev.preventDefault()}
+        >
+          {ctxMenu.items.map((item, i) =>
+            item === 'div' ? (
+              <div key={`d${i}`} className="menu-divider" role="separator" />
+            ) : (
+              <button
+                key={`${item.label}${i}`}
+                role="menuitem"
+                disabled={item.disabled}
+                aria-disabled={item.disabled || undefined}
+                className={`menu-item ${item.danger ? 'danger' : ''} ${ctxActive === i ? 'kb-active' : ''}`}
+                onMouseEnter={() => setCtxActive(i)}
+                onClick={() => {
+                  setCtxMenu(null);
+                  item.run();
+                }}
+              >
+                <span>{item.label}</span>
+                {item.hint && <span className="menu-shortcut">{item.hint}</span>}
+              </button>
+            )
+          )}
         </div>
       )}
       {page.elements
@@ -2524,7 +3703,18 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       )}
       {tool === 'frame' && (
         <div className="frame-presets" role="dialog" aria-label="Frame presets">
-          <span className="frame-presets-hint">Drag to draw a frame, or pick a preset:</span>
+          <div className="frame-presets-header">
+            <span className="frame-presets-hint">Drag to draw a frame, or pick a preset:</span>
+            <button
+              className="frame-presets-close"
+              type="button"
+              aria-label="Close frame presets"
+              title="Close"
+              onClick={() => setTool('select')}
+            >
+              ×
+            </button>
+          </div>
           <div className="frame-presets-row">
             {FRAME_PRESETS.map((fp) => (
               <button

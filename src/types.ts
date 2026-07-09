@@ -51,9 +51,29 @@ export interface SketchElement {
   seed: number;
   locked: boolean;
   groupId: string | null;
+  /** Arrowhead placement (Arrowhead fix): absent = 'end' for arrows and
+   * 'none' for lines. */
+  arrowHead?: ArrowHead;
   /** Persistent frame membership (Fix 1.39): set from the pointer position
    * while dragging, at creation, or by migration. null = top-level. */
   frameId?: string | null;
+  /** Non-destructive image crop (Fix 1.43): where the full image content
+   * draws, relative to the element's top-left. The element box is the
+   * visible mask. Absent/null = content exactly fills the box.
+   * `rotation` (Fix 1.45.1) spins the content about its own center, in
+   * degrees, independent of the element/mask rotation. */
+  crop?: { x: number; y: number; w: number; h: number; rotation?: number } | null;
+  /** Clipping mask (Fix 1.44): clip this image to a shape spanning the
+   * element box instead of the plain rectangle. The mask remembers the
+   * donor shape's style so releasing restores it. */
+  mask?: {
+    type: 'rectangle' | 'ellipse' | 'diamond' | 'triangle';
+    cornerRadius?: number;
+    fillColor?: string;
+    strokeColor?: string;
+    strokeWidth?: number;
+    strokeStyle?: StrokeStyle;
+  } | null;
   /**
    * Rotation in degrees around the bounding-box center. Linear elements
    * (line/arrow/freedraw) bake rotation into their points instead.
@@ -123,7 +143,11 @@ export interface Doc {
   currentPage: number;
 }
 
+export type ArrowHead = 'none' | 'start' | 'end' | 'both';
+
 export interface StyleDefaults {
+  /** Remembered arrowhead placement for newly drawn arrows (Arrowhead fix). */
+  arrowHead?: ArrowHead;
   strokeColor: string;
   fillColor: string;
   strokeWidth: number;

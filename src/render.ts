@@ -319,6 +319,13 @@ export function textColorOf(el: SketchElement): string {
   return el.strokeColor === 'transparent' ? '#1e1e1e' : el.strokeColor;
 }
 
+/** Which ends carry arrowheads (Arrowhead fix): arrows default to 'end',
+ * lines to 'none'; both types honor an explicit setting. */
+export function arrowHeadsOf(el: SketchElement): { start: boolean; end: boolean } {
+  const mode = el.arrowHead ?? (el.type === 'arrow' ? 'end' : 'none');
+  return { start: mode === 'start' || mode === 'both', end: mode === 'end' || mode === 'both' };
+}
+
 function drawArrowhead(
   ctx: CanvasRenderingContext2D,
   from: [number, number],
@@ -400,11 +407,184 @@ function drawSticky(ctx: CanvasRenderingContext2D, el: SketchElement) {
   }
 }
 
+/**
+ * Trace an element's visual outline into a fresh path (Fix 1.44.2):
+ * shapes follow their actual path (incl. corner radius), masked images
+ * follow the mask shape, linear elements follow their points, everything
+ * else falls back to the bounding rectangle. Rotation is NOT applied —
+ * callers transform the context.
+ */
+export function elementOutlinePath(ctx: CanvasRenderingContext2D, el: SketchElement) {
+  if (el.type === 'image' && el.mask) {
+    maskShapePath(ctx, el);
+    return;
+  }
+  if ((el.type === 'line' || el.type === 'arrow' || el.type === 'freedraw') && el.points && el.points.length > 0) {
+    const pts = absPoints(el);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    if (el.controlPoint && pts.length === 2) {
+      ctx.quadraticCurveTo(el.x + el.controlPoint[0], el.y + el.controlPoint[1], pts[1][0], pts[1][1]);
+    } else {
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    }
+    return;
+  }
+  const b = getBounds(el);
+  ctx.beginPath();
+  switch (el.type) {
+    case 'ellipse':
+      ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
+      break;
+    case 'diamond':
+      ctx.moveTo(b.x + b.w / 2, b.y);
+      ctx.lineTo(b.x + b.w, b.y + b.h / 2);
+      ctx.lineTo(b.x + b.w / 2, b.y + b.h);
+      ctx.lineTo(b.x, b.y + b.h / 2);
+      ctx.closePath();
+      break;
+    case 'triangle': {
+      const cr = Math.min(clampCornerRadius(el.cornerRadius ?? 0, b.w, b.h), Math.min(b.w, b.h) * 0.25);
+      const pts: [number, number][] = [
+        [b.x + b.w / 2, b.y],
+        [b.x + b.w, b.y + b.h],
+        [b.x, b.y + b.h],
+      ];
+      if (cr > 0) {
+        ctx.moveTo((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2);
+        ctx.arcTo(pts[1][0], pts[1][1], pts[2][0], pts[2][1], cr);
+        ctx.arcTo(pts[2][0], pts[2][1], pts[0][0], pts[0][1], cr);
+        ctx.arcTo(pts[0][0], pts[0][1], pts[1][0], pts[1][1], cr);
+        ctx.closePath();
+      } else {
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        ctx.lineTo(pts[1][0], pts[1][1]);
+        ctx.lineTo(pts[2][0], pts[2][1]);
+        ctx.closePath();
+      }
+      break;
+    }
+    case 'rectangle': {
+      const r = Math.min(clampCornerRadius(el.cornerRadius ?? 0, b.w, b.h), Math.min(b.w, b.h) / 2);
+      if (r > 0) {
+        ctx.moveTo(b.x + r, b.y);
+        ctx.arcTo(b.x + b.w, b.y, b.x + b.w, b.y + b.h, r);
+        ctx.arcTo(b.x + b.w, b.y + b.h, b.x, b.y + b.h, r);
+        ctx.arcTo(b.x, b.y + b.h, b.x, b.y, r);
+        ctx.arcTo(b.x, b.y, b.x + b.w, b.y, r);
+        ctx.closePath();
+      } else {
+        ctx.rect(b.x, b.y, b.w, b.h);
+      }
+      break;
+    }
+    default:
+      ctx.rect(b.x, b.y, b.w, b.h);
+  }
+}
+
+/** Trace an image's clipping-mask shape (Fix 1.44) into the current path. */
+export function maskShapePath(ctx: CanvasRenderingContext2D, el: SketchElement) {
+  const b = getBounds(el);
+  const m = el.mask!;
+  ctx.beginPath();
+  switch (m.type) {
+    case 'ellipse':
+      ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
+      break;
+    case 'diamond':
+      ctx.moveTo(b.x + b.w / 2, b.y);
+      ctx.lineTo(b.x + b.w, b.y + b.h / 2);
+      ctx.lineTo(b.x + b.w / 2, b.y + b.h);
+      ctx.lineTo(b.x, b.y + b.h / 2);
+      ctx.closePath();
+      break;
+    case 'triangle': {
+      const cr = Math.min(clampCornerRadius(m.cornerRadius ?? 0, b.w, b.h), Math.min(b.w, b.h) * 0.25);
+      const pts: [number, number][] = [
+        [b.x + b.w / 2, b.y],
+        [b.x + b.w, b.y + b.h],
+        [b.x, b.y + b.h],
+      ];
+      if (cr > 0) {
+        ctx.moveTo((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2);
+        ctx.arcTo(pts[1][0], pts[1][1], pts[2][0], pts[2][1], cr);
+        ctx.arcTo(pts[2][0], pts[2][1], pts[0][0], pts[0][1], cr);
+        ctx.arcTo(pts[0][0], pts[0][1], pts[1][0], pts[1][1], cr);
+        ctx.closePath();
+      } else {
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        ctx.lineTo(pts[1][0], pts[1][1]);
+        ctx.lineTo(pts[2][0], pts[2][1]);
+        ctx.closePath();
+      }
+      break;
+    }
+    default: {
+      const r = Math.min(clampCornerRadius(m.cornerRadius ?? 0, b.w, b.h), Math.min(b.w, b.h) / 2);
+      if (r > 0) {
+        ctx.moveTo(b.x + r, b.y);
+        ctx.arcTo(b.x + b.w, b.y, b.x + b.w, b.y + b.h, r);
+        ctx.arcTo(b.x + b.w, b.y + b.h, b.x, b.y + b.h, r);
+        ctx.arcTo(b.x, b.y + b.h, b.x, b.y, r);
+        ctx.arcTo(b.x, b.y, b.x + b.w, b.y, r);
+        ctx.closePath();
+      } else {
+        ctx.rect(b.x, b.y, b.w, b.h);
+      }
+    }
+  }
+}
+
+/** Draw crop content, honoring the content's own rotation (Fix 1.45.1). */
+function drawCropContent(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  bx: number,
+  by: number,
+  c: { x: number; y: number; w: number; h: number; rotation?: number }
+) {
+  if (c.rotation) {
+    const ccx = bx + c.x + c.w / 2;
+    const ccy = by + c.y + c.h / 2;
+    ctx.save();
+    ctx.translate(ccx, ccy);
+    ctx.rotate((c.rotation * Math.PI) / 180);
+    ctx.translate(-ccx, -ccy);
+    ctx.drawImage(img, bx + c.x, by + c.y, c.w, c.h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(img, bx + c.x, by + c.y, c.w, c.h);
+  }
+}
+
 function drawImageEl(ctx: CanvasRenderingContext2D, el: SketchElement, onImageLoad?: () => void) {
   const b = getBounds(el);
   const img = el.imageData ? getImage(el.imageData, onImageLoad) : null;
   if (img) {
-    ctx.drawImage(img, b.x, b.y, b.w, b.h);
+    if (el.mask) {
+      // Clipping mask (Fix 1.44): the image draws only inside the shape.
+      const c = el.crop ?? { x: 0, y: 0, w: b.w, h: b.h };
+      ctx.save();
+      maskShapePath(ctx, el);
+      ctx.clip();
+      drawCropContent(ctx, img, b.x, b.y, c);
+      ctx.restore();
+      return;
+    }
+    const c = el.crop;
+    if (c) {
+      // Non-destructive crop (Fix 1.43): the element box masks the full
+      // image content, which draws at its own rect inside/around the box.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(b.x, b.y, b.w, b.h);
+      ctx.clip();
+      drawCropContent(ctx, img, b.x, b.y, c);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, b.x, b.y, b.w, b.h);
+    }
   } else {
     ctx.save();
     ctx.fillStyle = '#e9ecef';
@@ -603,20 +783,30 @@ export function renderElement(
           ctx.quadraticCurveTo(cpAbs[0], cpAbs[1], pts[1][0], pts[1][1]);
           applyStroke(ctx, el, true);
           ctx.stroke();
-          if (el.type === 'arrow') {
-            // Arrowhead follows the Bézier tangent at t=1
-            const tangent = bezierTangent(1, pts[0][0], pts[0][1], cpAbs[0], cpAbs[1], pts[1][0], pts[1][1]);
-            drawArrowhead(ctx, pts[0], pts[1], el, tangent);
-            drawArrowLabel(ctx, el);
+          {
+            const heads = arrowHeadsOf(el);
+            if (heads.end) {
+              // Arrowhead follows the Bézier tangent at t=1
+              const tangent = bezierTangent(1, pts[0][0], pts[0][1], cpAbs[0], cpAbs[1], pts[1][0], pts[1][1]);
+              drawArrowhead(ctx, pts[0], pts[1], el, tangent);
+            }
+            if (heads.start) {
+              // Outward along the reversed tangent at t=0
+              const t0 = bezierTangent(0, pts[0][0], pts[0][1], cpAbs[0], cpAbs[1], pts[1][0], pts[1][1]);
+              drawArrowhead(ctx, pts[1], pts[0], el, [-t0[0], -t0[1]]);
+            }
           }
+          if (el.type === 'arrow') drawArrowLabel(ctx, el);
         } else {
           for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
           applyStroke(ctx, el, true);
           ctx.stroke();
-          if (el.type === 'arrow') {
-            drawArrowhead(ctx, pts[pts.length - 2], pts[pts.length - 1], el);
-            drawArrowLabel(ctx, el);
+          {
+            const heads = arrowHeadsOf(el);
+            if (heads.end) drawArrowhead(ctx, pts[pts.length - 2], pts[pts.length - 1], el);
+            if (heads.start) drawArrowhead(ctx, pts[1], pts[0], el);
           }
+          if (el.type === 'arrow') drawArrowLabel(ctx, el);
         }
       }
       break;
