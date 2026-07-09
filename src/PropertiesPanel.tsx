@@ -5,6 +5,7 @@ import { Icons } from './Icons';
 import { isTextContainer } from './render';
 import { FONT_SIZE_MAX, FONT_SIZE_MIN, normalizeUrl } from './types';
 import { boundsUnion, clampCornerRadius, getBounds } from './geometry';
+import { isGroupElement, isGroupableElement, selectedGroupRoots } from './elementOps';
 import type { AlignAction, DistributeAction, ZAction } from './elementOps';
 import type { SketchElement, StrokeStyle, StyleDefaults, Tool, Point } from './types';
 
@@ -598,7 +599,13 @@ function DimensionsControls({
 }
 
 export function PropertiesPanel(props: Props) {
-  const { selected, defaults, tool, onStyle, onStyleLive, onStyleEnd } = props;
+  const { defaults, tool, onStyle, onStyleLive, onStyleEnd } = props;
+  const allSelected = props.selected;
+  const selected = allSelected.filter((el) => el.type !== 'group');
+  const selectedIds = new Set(allSelected.map((el) => el.id));
+  const selectedRoots = selectedGroupRoots(allSelected, selectedIds);
+  const canGroup = selectedRoots.filter(isGroupableElement).length >= 2;
+  const canUngroup = selectedRoots.some(isGroupElement);
   const hasSelection = selected.length > 0;
   const first = selected[0];
 
@@ -623,8 +630,6 @@ export function PropertiesPanel(props: Props) {
   const autoContrastOn =
     containedTextSelected.length > 0 && containedTextSelected.every((el) => el.autoTextContrast !== false);
   const anyLocked = selected.some((el) => el.locked);
-  const anyGrouped = selected.some((el) => el.groupId);
-
   // Context-aware capability model (Fix 1.26): a section renders only when
   // EVERY selected element supports it — or, with nothing selected, when the
   // active drawing tool would create an element that supports it.
@@ -1130,7 +1135,7 @@ export function PropertiesPanel(props: Props) {
                 className="icon-btn"
                 onClick={props.onGroup}
                 title="Group (Ctrl/Cmd+G)"
-                disabled={selected.length < 2}
+                disabled={!canGroup}
               >
                 {Icons.group}
               </button>
@@ -1138,7 +1143,7 @@ export function PropertiesPanel(props: Props) {
                 className="icon-btn"
                 onClick={props.onUngroup}
                 title="Ungroup (Ctrl/Cmd+Shift+G)"
-                disabled={!anyGrouped}
+                disabled={!canUngroup}
               >
                 {Icons.ungroup}
               </button>

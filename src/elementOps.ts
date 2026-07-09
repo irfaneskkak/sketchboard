@@ -2,6 +2,66 @@ import { boundsUnion, getAABB, getBounds } from './geometry';
 import { randomSeed, uid } from './types';
 import type { Point, SketchElement } from './types';
 
+export function isGroupElement(el: SketchElement | undefined | null): el is SketchElement & { type: 'group'; childIds: string[] } {
+  return !!el && el.type === 'group' && Array.isArray(el.childIds);
+}
+
+export function isGroupableElement(el: SketchElement | undefined | null): el is SketchElement {
+  return !!el && el.type !== 'frame';
+}
+
+export function elementMap(elements: SketchElement[]): Map<string, SketchElement> {
+  return new Map(elements.map((el) => [el.id, el]));
+}
+
+export function groupParentMap(elements: SketchElement[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const el of elements) {
+    if (isGroupElement(el)) {
+      for (const childId of el.childIds) out.set(childId, el.id);
+    }
+    if (el.groupId) out.set(el.id, el.groupId);
+  }
+  return out;
+}
+
+export function groupDescendantIds(elements: SketchElement[], groupId: string): string[] {
+  const byId = elementMap(elements);
+  const out: string[] = [];
+  const walk = (id: string) => {
+    const group = byId.get(id);
+    if (!isGroupElement(group)) return;
+    for (const childId of group.childIds) {
+      if (out.includes(childId)) continue;
+      out.push(childId);
+      walk(childId);
+    }
+  };
+  walk(groupId);
+  return out;
+}
+
+export function groupAncestorIds(elements: SketchElement[], id: string): string[] {
+  const parentById = groupParentMap(elements);
+  const out: string[] = [];
+  let cur = parentById.get(id);
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    out.push(cur);
+    cur = parentById.get(cur);
+  }
+  return out;
+}
+
+export function selectedGroupRoots(elements: SketchElement[], ids: Set<string>): SketchElement[] {
+  const byId = elementMap(elements);
+  return elements.filter((el) => {
+    if (!ids.has(el.id) || !isGroupableElement(el)) return false;
+    return !groupAncestorIds(elements, el.id).some((ancestorId) => ids.has(ancestorId) && byId.has(ancestorId));
+  });
+}
+
 /* ----------------------------------- frames ---------------------------------- */
 
 /** Is the element's center inside the frame's bounds? */
@@ -81,11 +141,14 @@ export function removeElements(elements: SketchElement[], ids: Set<string>): Ske
     .map((el) => {
       const dropStart = el.startBinding && ids.has(el.startBinding);
       const dropEnd = el.endBinding && ids.has(el.endBinding);
-      if (!dropStart && !dropEnd) return el;
+      const nextChildIds = el.childIds?.filter((childId) => !ids.has(childId));
+      const childIdsChanged = !!el.childIds && nextChildIds!.length !== el.childIds.length;
+      if (!dropStart && !dropEnd && !childIdsChanged) return el;
       return {
         ...el,
         startBinding: dropStart ? null : el.startBinding,
         endBinding: dropEnd ? null : el.endBinding,
+        childIds: childIdsChanged ? nextChildIds : el.childIds,
       };
     });
 }
@@ -101,9 +164,14 @@ export function cloneElements(source: SketchElement[], dx: number, dy: number): 
     copy.seed = randomSeed();
     copy.x += dx;
     copy.y += dy;
+    if (copy.childIds) copy.childIds = copy.childIds.filter((id) => idMap.has(id)).map((id) => idMap.get(id)!);
     if (copy.groupId) {
-      if (!groupMap.has(copy.groupId)) groupMap.set(copy.groupId, uid());
-      copy.groupId = groupMap.get(copy.groupId)!;
+      if (idMap.has(copy.groupId)) {
+        copy.groupId = idMap.get(copy.groupId)!;
+      } else {
+        if (!groupMap.has(copy.groupId)) groupMap.set(copy.groupId, uid());
+        copy.groupId = groupMap.get(copy.groupId)!;
+      }
     }
     copy.startBinding = copy.startBinding && idMap.has(copy.startBinding) ? idMap.get(copy.startBinding)! : null;
     copy.endBinding = copy.endBinding && idMap.has(copy.endBinding) ? idMap.get(copy.endBinding)! : null;
@@ -114,13 +182,29 @@ export function cloneElements(source: SketchElement[], dx: number, dy: number): 
 
 /** Expand a set of ids so whole groups are always selected together. */
 export function expandWithGroups(elements: SketchElement[], ids: string[]): string[] {
-  const groups = new Set<string>();
+  const byId = elementMap(elements);
+  const parentById = groupParentMap(elements);
   const idSet = new Set(ids);
-  for (const el of elements) {
-    if (idSet.has(el.id) && el.groupId) groups.add(el.groupId);
-  }
-  for (const el of elements) {
-    if (el.groupId && groups.has(el.groupId)) idSet.add(el.id);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of [...idSet]) {
+      const parentId = parentById.get(id);
+      if (parentId && !idSet.has(parentId)) {
+        idSet.add(parentId);
+        changed = true;
+      }
+      const el = byId.get(id);
+      if (isGroupElement(el)) {
+        for (const childId of el.childIds) {
+          if (!idSet.has(childId)) {
+            idSet.add(childId);
+            changed = true;
+          }
+        }
+      }
+    }
   }
   return [...idSet];
 }
@@ -226,12 +310,15 @@ type ElementUnit = {
 };
 
 function selectedUnits(elements: SketchElement[], ids: Set<string>): ElementUnit[] {
-  const selected = elements.filter((el) => ids.has(el.id) && !el.locked);
+  const roots = selectedGroupRoots(elements, ids).filter((el) => !el.locked);
+  const byId = elementMap(elements);
   const units = new Map<string, SketchElement[]>();
-  for (const el of selected) {
-    const key = el.groupId ?? el.id;
-    if (!units.has(key)) units.set(key, []);
-    units.get(key)!.push(el);
+  for (const root of roots) {
+    const key = root.id;
+    const members = isGroupElement(root)
+      ? groupDescendantIds(elements, root.id).map((id) => byId.get(id)).filter((el): el is SketchElement => !!el && el.type !== 'group')
+      : [root];
+    units.set(key, members.length > 0 ? members : [root]);
   }
   return [...units.entries()].map(([key, members]) => ({
     key,
@@ -250,6 +337,7 @@ function selectedUnits(elements: SketchElement[], ids: Set<string>): ElementUnit
 export function alignElements(elements: SketchElement[], ids: Set<string>, action: AlignAction): SketchElement[] {
   const units = selectedUnits(elements, ids);
   if (units.length === 0) return elements;
+  const roots = selectedGroupRoots(elements, ids);
 
   let overall: ReturnType<typeof boundsUnion>;
   if (units.length === 1) {
@@ -288,8 +376,9 @@ export function alignElements(elements: SketchElement[], ids: Set<string>, actio
     shifts.set(key, [dx, dy]);
   }
   return elements.map((el) => {
-    const key = el.groupId ?? el.id;
-    if (!ids.has(el.id) || el.locked || !shifts.has(key)) return el;
+    const root = roots.find((candidate) => candidate.id === el.id || groupAncestorIds(elements, el.id).includes(candidate.id));
+    const key = root?.id ?? el.id;
+    if (el.type === 'group' || !ids.has(el.id) || el.locked || !shifts.has(key)) return el;
     const [dx, dy] = shifts.get(key)!;
     return { ...el, x: el.x + dx, y: el.y + dy };
   });
@@ -298,6 +387,7 @@ export function alignElements(elements: SketchElement[], ids: Set<string>, actio
 export function distributeElements(elements: SketchElement[], ids: Set<string>, action: DistributeAction): SketchElement[] {
   const units = selectedUnits(elements, ids);
   if (units.length < 3) return elements;
+  const roots = selectedGroupRoots(elements, ids);
 
   const sorted = [...units].sort((a, b) =>
     action === 'horizontal'
@@ -330,8 +420,9 @@ export function distributeElements(elements: SketchElement[], ids: Set<string>, 
   }
 
   return elements.map((el) => {
-    const key = el.groupId ?? el.id;
-    if (!ids.has(el.id) || el.locked || !shifts.has(key)) return el;
+    const root = roots.find((candidate) => candidate.id === el.id || groupAncestorIds(elements, el.id).includes(candidate.id));
+    const key = root?.id ?? el.id;
+    if (el.type === 'group' || !ids.has(el.id) || el.locked || !shifts.has(key)) return el;
     const [dx, dy] = shifts.get(key)!;
     return { ...el, x: el.x + dx, y: el.y + dy };
   });

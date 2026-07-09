@@ -30,7 +30,17 @@ import {
 } from './geometry';
 import type { Bounds } from './geometry';
 import { contrastTextColor } from './ColorPicker';
-import { cloneElements, expandWithGroups, freeFramePosition, nextName, removeElements, withFrameContents } from './elementOps';
+import {
+  cloneElements,
+  expandWithGroups,
+  freeFramePosition,
+  isGroupElement,
+  isGroupableElement,
+  nextName,
+  removeElements,
+  selectedGroupRoots,
+  withFrameContents,
+} from './elementOps';
 import { Icons } from './Icons';
 import {
   LINE_HEIGHT,
@@ -590,6 +600,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const els = getElements();
     const threshold = 6 / stateRef.current.view.zoom;
     for (let i = els.length - 1; i >= 0; i--) {
+      if (els[i].type === 'group') continue;
       if (els[i].locked) continue;
       if (isInsideLockedFrame(els[i], els)) continue;
       if (els[i].type === 'frame' && !frameTitleHitTest(els[i], x, y, threshold)) continue;
@@ -601,7 +612,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
 
   const selectionBounds = (): Bounds | null => {
     const { selection: sel } = stateRef.current;
-    const els = getElements().filter((e) => sel.includes(e.id));
+    const els = getElements().filter((e) => e.type !== 'group' && sel.includes(e.id));
     if (els.length === 0) return null;
     return boundsUnion(els.map(getBounds));
   };
@@ -609,7 +620,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   const singleLinearSelected = (): SketchElement | null => {
     const { selection: sel } = stateRef.current;
     if (sel.length !== 1) return null;
-    const el = getElements().find((e) => e.id === sel[0]);
+    const el = getElements().find((e) => e.type !== 'group' && e.id === sel[0]);
     return el && (el.type === 'line' || el.type === 'arrow') && el.points?.length === 2 ? el : null;
   };
 
@@ -620,7 +631,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
    */
   const selectionFrame = (): { b: Bounds; rot: number; single: SketchElement | null } | null => {
     const { selection: sel } = stateRef.current;
-    const els = getElements().filter((e) => sel.includes(e.id));
+    const els = getElements().filter((e) => e.type !== 'group' && sel.includes(e.id));
     if (els.length === 0) return null;
     if (els.length === 1) {
       return { b: getBounds(els[0]), rot: rotationRad(els[0]), single: els[0] };
@@ -1857,6 +1868,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         const els = getElements();
         const hitIds = els
           .filter((el) => el.type !== 'frame' && !el.locked && !isInsideLockedFrame(el, els) && boundsIntersect(r, getAABB(el)))
+          .filter((el) => el.type !== 'group')
           .map((el) => el.id);
         setSelection(expandWithGroups(els, hitIds));
         return;
@@ -2121,10 +2133,16 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
 
     // Multi-selection.
     if (selected.length > 1) {
-      const allGrouped =
-        selected.every((x) => x.groupId) && new Set(selected.map((x) => x.groupId)).size === 1;
+      const selectedIds = new Set(selection);
+      const roots = selectedGroupRoots(els, selectedIds);
+      const groupRoots = roots.filter(isGroupElement);
+      const validGroupRoots = roots.filter(isGroupableElement);
       const items: CtxItem[] = [];
-      items.push(allGrouped ? a('ungroup', 'Ungroup', { hint: '⇧⌘G' }) : a('group', 'Group', { hint: '⌘G' }));
+      if (roots.length === 1 && groupRoots.length === 1) {
+        items.push(a('ungroup', 'Ungroup', { hint: '⇧⌘G' }));
+      } else if (roots.length >= 2 && validGroupRoots.length >= 2) {
+        items.push(a('group', 'Group', { hint: '⌘G' }));
+      }
       if (canMakeMask) items.push({ label: 'Make clipping mask', run: onMakeMask, hint: '⌘7' });
       items.push('div', ...commonEdit, 'div');
       items.push(
@@ -2455,6 +2473,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
           const els = getElements();
           const hitIds = els
             .filter((el) => el.type !== 'frame' && !el.locked && !isInsideLockedFrame(el, els) && lassoCaptures(action.points, getAABB(el)))
+            .filter((el) => el.type !== 'group')
             .map((el) => el.id);
           if (hitIds.length > 0 || !e.shiftKey) {
             setSelection(expandWithGroups(els, hitIds));
@@ -2800,7 +2819,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     // state — no handles or selection frame on the edited element (Fix 1.35).
     const editingTextId = editing?.kind === 'text' ? editing.id : null;
     const selEls = page.elements.filter(
-      (el) => selection.includes(el.id) && el.id !== editingTextId && el.id !== cropId
+      (el) => el.type !== 'group' && selection.includes(el.id) && el.id !== editingTextId && el.id !== cropId
     );
     if (selEls.length > 0) {
       const linear =
@@ -3084,6 +3103,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
 
     // Link badges on linked elements that are selected or hovered.
     for (const el of page.elements) {
+      if (el.type === 'group') continue;
       if (!el.link) continue;
       if (!selection.includes(el.id) && el.id !== hoveredId) continue;
       const bb = getAABB(el);

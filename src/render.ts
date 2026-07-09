@@ -690,6 +690,7 @@ export function renderElement(
   /** Frame label font size in page units (pass 12/zoom for screen-constant labels). */
   frameLabelSize?: number
 ) {
+  if (el.type === 'group') return;
   ctx.save();
   ctx.globalAlpha = (el.opacity ?? 100) / 100;
   const b = getBounds(el);
@@ -935,6 +936,7 @@ export function renderElementClipped(
   onImageLoad?: () => void,
   frameLabelSize?: number
 ) {
+  if (el.type === 'group') return;
   const frame = clipFrameFor(el, elements);
   if (!frame) {
     renderElement(ctx, el, onImageLoad, frameLabelSize);

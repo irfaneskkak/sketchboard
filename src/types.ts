@@ -28,7 +28,8 @@ export type ElementType =
   | 'image'
   | 'embed'
   | 'frame'
-  | 'triangle';
+  | 'triangle'
+  | 'group';
 
 export type Point = [number, number];
 
@@ -50,7 +51,10 @@ export interface SketchElement {
   opacity: number; // 0..100
   seed: number;
   locked: boolean;
+  /** Parent group id for true nested grouping. null = not inside a group. */
   groupId: string | null;
+  /** Immediate children when this element is a group. Frames/artboards must never appear here. */
+  childIds?: string[];
   /** Arrowhead placement (Arrowhead fix): absent = 'end' for arrows and
    * 'none' for lines. */
   arrowHead?: ArrowHead;
@@ -372,10 +376,54 @@ export function normalizeDoc(doc: Doc): Doc {
       }),
     };
   });
+  // Migration: legacy grouping stored only `groupId` on children. Materialize
+  // missing group records so future grouping can nest via `childIds`.
+  const withGroups = withMembership.map((p) => {
+    const existing = new Set(p.elements.map((el) => el.id));
+    const grouped = new Map<string, SketchElement[]>();
+    for (const el of p.elements) {
+      if (!el.groupId || el.type === 'frame') continue;
+      if (!grouped.has(el.groupId)) grouped.set(el.groupId, []);
+      grouped.get(el.groupId)!.push(el);
+    }
+    const groups: SketchElement[] = [];
+    for (const [groupId, children] of grouped) {
+      if (existing.has(groupId) || children.length === 0) continue;
+      const minX = Math.min(...children.map((el) => el.x));
+      const minY = Math.min(...children.map((el) => el.y));
+      const maxX = Math.max(...children.map((el) => el.x + el.width));
+      const maxY = Math.max(...children.map((el) => el.y + el.height));
+      const parentIds = [...new Set(children.map((el) => el.groupId === groupId ? null : el.groupId ?? null))];
+      const frameIds = [...new Set(children.map((el) => el.frameId ?? null))];
+      groups.push({
+        id: groupId,
+        type: 'group',
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+        strokeColor: 'transparent',
+        fillColor: 'transparent',
+        strokeWidth: 0,
+        strokeStyle: 'solid',
+        opacity: 100,
+        seed: randomSeed(),
+        locked: false,
+        groupId: parentIds.length === 1 ? parentIds[0] : null,
+        frameId: frameIds.length === 1 ? frameIds[0] : null,
+        childIds: children.map((el) => el.id).filter((id) => {
+          const child = children.find((el) => el.id === id);
+          return child?.type !== 'frame';
+        }),
+      });
+    }
+    return groups.length > 0 ? { ...p, elements: [...p.elements, ...groups] } : p;
+  });
+
   return {
     ...doc,
     title: doc.title || 'Untitled document',
-    pages: withMembership,
-    currentPage: Math.min(Math.max(0, doc.currentPage), withMembership.length - 1),
+    pages: withGroups,
+    currentPage: Math.min(Math.max(0, doc.currentPage), withGroups.length - 1),
   };
 }

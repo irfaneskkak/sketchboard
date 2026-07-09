@@ -8,18 +8,24 @@ import {
   alignElements,
   cloneElements,
   distributeElements,
+  elementMap,
   expandWithGroups,
   freeFramePosition,
+  groupDescendantIds,
+  groupParentMap,
+  isGroupElement,
+  isGroupableElement,
   nextName,
   removeElements,
   reorderElements,
   resizeSelectionDimensions,
+  selectedGroupRoots,
   withFrameContents,
 } from './elementOps';
 import type { AlignAction, DistributeAction, ZAction } from './elementOps';
 import { exportFrame, exportFramesPDF, exportJSON, exportPageAs, exportPDF, exportPNGBundle, exportPNGs, exportSVGs, importJSON } from './export';
 import { Icons } from './Icons';
-import { getBounds, updateBoundArrows } from './geometry';
+import { boundsUnion, getBounds, updateBoundArrows } from './geometry';
 import { fileToImageData } from './imageUtils';
 import { PagePanel } from './PagePanel';
 import { PropertiesPanel } from './PropertiesPanel';
@@ -437,7 +443,7 @@ export default function App() {
     if (sel.length === 0) return;
     const els = currentElements();
     // Deleting a frame deletes its contents too, after confirmation.
-    const expanded = withFrameContents(els, sel);
+    const expanded = withFrameContents(els, expandWithGroups(els, sel));
     const carried = expanded.size - sel.length;
     if (sel.some((id) => els.find((e) => e.id === id)?.type === 'frame') && carried > 0) {
       if (!window.confirm(`Delete frame and all contents? (${carried} object${carried > 1 ? 's' : ''} inside)`)) {
@@ -456,7 +462,7 @@ export default function App() {
     const sel = selectionRef.current;
     if (sel.length === 0) return;
     const els = currentElements();
-    const ids = withFrameContents(els, sel);
+    const ids = withFrameContents(els, expandWithGroups(els, sel));
     const source = els.filter((e) => ids.has(e.id));
     // Duplicating a single frame: place the copy beside the original with
     // a 100px gap and an auto-incremented name (Fix 1.17).
@@ -478,15 +484,16 @@ export default function App() {
     const offset = lastDuplicateOffsetRef.current ?? { dx: 16, dy: 16 };
     const clones = cloneElements(source, offset.dx, offset.dy);
     updateElements([...els, ...clones], true);
-    setSelection(clones.map((c) => c.id));
+    setSelection(expandWithGroups([...els, ...clones], clones.map((c) => c.id)));
     lastDuplicateOffsetRef.current = offset;
   }, [updateElements]);
 
   const copySelection = useCallback(() => {
-    const sel = selectionRef.current;
+    const all = currentElements();
+    const sel = expandWithGroups(all, selectionRef.current);
     if (sel.length === 0) return false;
     clipboardRef.current = JSON.parse(
-      JSON.stringify(currentElements().filter((e) => sel.includes(e.id)))
+      JSON.stringify(all.filter((e) => sel.includes(e.id)))
     );
     return true;
   }, []);
@@ -495,8 +502,9 @@ export default function App() {
     if (clipboardRef.current.length === 0) return;
     const els = currentElements();
     const clones = cloneElements(clipboardRef.current, 16, 16);
-    updateElements([...els, ...clones], true);
-    setSelection(clones.map((c) => c.id));
+    const next = [...els, ...clones];
+    updateElements(next, true);
+    setSelection(expandWithGroups(next, clones.map((c) => c.id)));
     setToolState('select');
   }, [updateElements]);
 
@@ -511,21 +519,93 @@ export default function App() {
   }, [updateElements]);
 
   const groupSelection = useCallback(() => {
-    const sel = new Set(selectionRef.current);
-    if (sel.size < 2) return;
+    const els = currentElements();
+    const sel = new Set(expandWithGroups(els, selectionRef.current));
+    const roots = selectedGroupRoots(els, sel).filter((el) => isGroupableElement(el) && !el.locked);
+    if (roots.length < 2) {
+      const selected = els.filter((el) => sel.has(el.id));
+      if (selected.length > 0 && selected.every((el) => el.type === 'frame')) {
+        showToast('Frames cannot be grouped.');
+      }
+      return;
+    }
+
     const gid = uid();
-    updateElements(
-      currentElements().map((e) => (sel.has(e.id) ? { ...e, groupId: gid } : e)),
-      true
-    );
-  }, [updateElements]);
+    const byId = elementMap(els);
+    const boxes = roots.map((root) => {
+      if (!isGroupElement(root)) return getBounds(root);
+      const members = groupDescendantIds(els, root.id)
+        .map((id) => byId.get(id))
+        .filter((el): el is SketchElement => !!el && el.type !== 'group');
+      return members.length > 0 ? boundsUnion(members.map(getBounds)) : getBounds(root);
+    });
+    const minX = Math.min(...boxes.map((box) => box.x));
+    const minY = Math.min(...boxes.map((box) => box.y));
+    const maxX = Math.max(...boxes.map((box) => box.x + box.w));
+    const maxY = Math.max(...boxes.map((box) => box.y + box.h));
+    const rootIds = roots.map((el) => el.id);
+    const parentIds = [...new Set(roots.map((el) => el.groupId ?? null))];
+    const parentGroupId = parentIds.length === 1 ? parentIds[0] : null;
+    const frameIds = [...new Set(roots.map((el) => el.frameId ?? null))];
+    const frameId = frameIds.length === 1 ? frameIds[0] : null;
+    const group: SketchElement = {
+      id: gid,
+      type: 'group',
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+      strokeColor: 'transparent',
+      fillColor: 'transparent',
+      strokeWidth: 0,
+      strokeStyle: 'solid',
+      opacity: 100,
+      seed: 0,
+      locked: false,
+      groupId: parentGroupId,
+      frameId,
+      childIds: rootIds,
+    };
+    const lastRootIndex = Math.max(...rootIds.map((id) => els.findIndex((el) => el.id === id)));
+    const next = els.map((el) => {
+      if (rootIds.includes(el.id)) return { ...el, groupId: gid };
+      if (parentGroupId && el.id === parentGroupId && isGroupElement(el)) {
+        const childIds = el.childIds.flatMap((childId) => (rootIds.includes(childId) ? [gid] : [childId]));
+        return { ...el, childIds: [...new Set(childIds)] };
+      }
+      return el;
+    });
+    next.splice(lastRootIndex + 1, 0, group);
+    updateElements(next, true);
+    setSelection(expandWithGroups(next, [gid]));
+  }, [showToast, updateElements]);
 
   const ungroupSelection = useCallback(() => {
-    const sel = new Set(selectionRef.current);
-    updateElements(
-      currentElements().map((e) => (sel.has(e.id) ? { ...e, groupId: null } : e)),
-      true
-    );
+    const els = currentElements();
+    const sel = new Set(expandWithGroups(els, selectionRef.current));
+    const byId = elementMap(els);
+    const parentById = groupParentMap(els);
+    const groups = selectedGroupRoots(els, sel).filter(isGroupElement);
+    if (groups.length === 0) return;
+    const removeIds = new Set(groups.map((group) => group.id));
+    const immediateChildren = groups.flatMap((group) => group.childIds).filter((id) => byId.has(id));
+    const next = els
+      .filter((el) => !removeIds.has(el.id))
+      .map((el) => {
+        const removedParent = parentById.get(el.id);
+        const removedGroup = groups.find((group) => group.id === removedParent);
+        if (removedGroup) return { ...el, groupId: removedGroup.groupId ?? null };
+        if (isGroupElement(el)) {
+          const childIds = el.childIds.flatMap((childId) => {
+            const removed = groups.find((group) => group.id === childId);
+            return removed ? removed.childIds : [childId];
+          });
+          return { ...el, childIds };
+        }
+        return el;
+      });
+    updateElements(next, true);
+    setSelection(expandWithGroups(next, immediateChildren));
   }, [updateElements]);
 
   const zOrder = useCallback(

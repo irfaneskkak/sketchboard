@@ -17,6 +17,7 @@ import {
   textColorOf,
   wrapText,
 } from './render';
+import { isGroupElement } from './elementOps';
 import { FONT_FAMILY, isValidDoc, normalizeDoc, pageSize } from './types';
 import type { Doc, Page, Point, SketchElement } from './types';
 
@@ -508,9 +509,28 @@ function frameClipDefs(page: Page): string {
 
 /** Render an element, wrapped in its containing frame's clipPath (Fix 1.37). */
 function elementToClippedSVG(el: SketchElement, page: Page): string {
+  if (el.type === 'group') return '';
   const svg = elementToSVG(el);
   const frame = clipFrameFor(el, page.elements);
   return frame ? `<g clip-path="url(#clip-${esc(frame.id)})">${svg}</g>` : svg;
+}
+
+function groupedElementToSVG(el: SketchElement, page: Page, seen = new Set<string>()): string {
+  if (!isGroupElement(el)) return elementToClippedSVG(el, page);
+  if (seen.has(el.id)) return '';
+  seen.add(el.id);
+  const childIds = new Set(el.childIds);
+  const children = page.elements
+    .filter((child) => childIds.has(child.id) && child.type !== 'frame')
+    .map((child) => groupedElementToSVG(child, page, new Set(seen)))
+    .join('');
+  return children ? `<g id="${esc(el.id)}">${children}</g>` : '';
+}
+
+function pageElementsToSVG(page: Page): string[] {
+  return page.elements
+    .filter((el) => !el.groupId)
+    .map((el) => groupedElementToSVG(el, page));
 }
 
 export function pageToSVG(page: Page): string {
@@ -519,7 +539,7 @@ export function pageToSVG(page: Page): string {
     `<svg xmlns="http://www.w3.org/2000/svg" width="${box.w}" height="${box.h}" viewBox="${box.x} ${box.y} ${box.w} ${box.h}">`,
     frameClipDefs(page),
     `<rect x="${box.x}" y="${box.y}" width="${box.w}" height="${box.h}" fill="#ffffff" />`,
-    ...page.elements.map((el) => elementToClippedSVG(el, page)),
+    ...pageElementsToSVG(page),
     '</svg>',
   ].join('\n');
 }
@@ -596,7 +616,8 @@ function frameToSVG(page: Page, frame: SketchElement): string {
   const fb = getBounds(frame);
   const inner = page.elements
     .filter((el) => el.id !== frame.id)
-    .map((el) => elementToClippedSVG(el, page))
+    .filter((el) => !el.groupId)
+    .map((el) => groupedElementToSVG(el, page))
     .join('\n');
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${fb.w}" height="${fb.h}" viewBox="${fb.x} ${fb.y} ${fb.w} ${fb.h}">`,
