@@ -64,7 +64,35 @@ const TOOL_KEYS: Record<string, Tool> = {
   y: 'triangle',
 };
 
+function useIsMobileView() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 1024;
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 1024);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      document.body.classList.add('mobile-blocked');
+    } else {
+      document.body.classList.remove('mobile-blocked');
+    }
+  }, [isMobile]);
+
+  return isMobile;
+}
+
 export default function App() {
+  const isMobile = useIsMobileView();
   const [doc, setDocState] = useState<Doc>(() => newDoc());
   const [loaded, setLoaded] = useState(false);
   const [selection, setSelection] = useState<string[]>([]);
@@ -1280,6 +1308,24 @@ export default function App() {
   /* ----------------------------------- render --------------------------------- */
 
   const page = doc.pages[doc.currentPage];
+
+  if (isMobile) {
+    return (
+      <div className="desktop-only-screen">
+        <div className="desktop-only-content">
+          <img src="/assets/logo-white.svg" alt="Sketchboard Logo" className="desktop-only-logo" />
+          <h1>Thank you for visiting.</h1>
+          <p>
+            This website currently supports only the desktop version.
+            Mobile support is coming soon.
+          </p>
+          <p className="desktop-only-note">
+            Please open this website on a desktop or laptop for the best experience.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

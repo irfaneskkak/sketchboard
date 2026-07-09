@@ -63,7 +63,10 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h3>About</h3>
+          <div className="modal-title-with-logo">
+            <img src="/assets/logo-white.svg" alt="Sketchboard" className="modal-header-logo" />
+            <h3>About</h3>
+          </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close about">
             {Icons.close}
           </button>
