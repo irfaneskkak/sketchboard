@@ -213,6 +213,7 @@ interface Props {
   onReleaseMask: () => void;
   /** Dimensions-panel aspect-ratio lock: handle resizing stays proportional. */
   ratioLocked: boolean;
+  onStoreDuplicateOffset?: (dx: number, dy: number) => void;
 }
 
 export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(props, ref) {
@@ -2390,6 +2391,16 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
             // Plain click on an already-selected element: reduce selection to it.
             const hit = selectableAt(px, py);
             if (hit) setSelection(expandWithGroups(getElements(), [hit.id]));
+          }
+        } else if (action.isDup) {
+          // Calculate the displacement and store it as the last duplicate offset.
+          const currentEls = getElements();
+          const firstOrig = action.origEls[0];
+          const firstClone = currentEls.find((el) => el.id === firstOrig.id);
+          if (firstClone && firstOrig) {
+            const dx = firstClone.x - firstOrig.x;
+            const dy = firstClone.y - firstOrig.y;
+            props.onStoreDuplicateOffset?.(dx, dy);
           }
         }
         endGesture();

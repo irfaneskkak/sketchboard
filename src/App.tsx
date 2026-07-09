@@ -123,6 +123,10 @@ export default function App() {
   const saveTimerRef = useRef<number | undefined>(undefined);
   const saveFailedRef = useRef(false);
   const prevToolRef = useRef<Tool>('select');
+  const lastDuplicateOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
+  const storeDuplicateOffset = useCallback((dx: number, dy: number) => {
+    lastDuplicateOffsetRef.current = { dx, dy };
+  }, []);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -468,11 +472,14 @@ export default function App() {
       updateElements([...els, ...clones], true);
       const frameClone = clones.find((c) => c.type === 'frame');
       setSelection(frameClone ? [frameClone.id] : clones.map((c) => c.id));
+      lastDuplicateOffsetRef.current = { dx: nx - fb.x, dy: ny - fb.y };
       return;
     }
-    const clones = cloneElements(source, 16, 16);
+    const offset = lastDuplicateOffsetRef.current ?? { dx: 16, dy: 16 };
+    const clones = cloneElements(source, offset.dx, offset.dy);
     updateElements([...els, ...clones], true);
     setSelection(clones.map((c) => c.id));
+    lastDuplicateOffsetRef.current = offset;
   }, [updateElements]);
 
   const copySelection = useCallback(() => {
@@ -1382,6 +1389,7 @@ export default function App() {
             onMakeMask={makeClippingMask}
             onReleaseMask={releaseClippingMask}
             ratioLocked={ratioLocked}
+            onStoreDuplicateOffset={storeDuplicateOffset}
           />
           <div className="floating-bottom">
             <ToolPanel tool={tool} setTool={setTool} />
