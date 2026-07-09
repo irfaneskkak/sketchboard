@@ -150,6 +150,28 @@ workspace path contains `:` characters, which break `PATH` lookups.
   selection: images, multi-selections, and square/circular shapes start
   locked; other shapes and frames start unlocked. Undo restores both
   dimensions in one step.
+- **Frame clipping** (Fix 1.37/1.39) — frames clip their contents: every
+  element type (shapes, lines, arrows, text, images, stickies, embeds,
+  groups) can belong to a frame and is clipped at its boundary. Membership
+  is **pointer-driven and persistent** (`frameId`, Fix 1.39): while
+  dragging, the element joins the frame under the *cursor* — even if 80%
+  of it hangs outside, it stays a clipped member until the cursor leaves
+  the frame; no overlap-percentage or center rule ejects it. New elements
+  join the frame they're drawn in, duplicated frames remap their children,
+  moving/nudging a frame carries members, resizing never changes
+  membership, and legacy documents migrate automatically. The hidden
+  overflow is not clickable or erasable, the frame under the cursor glows
+  while dragging, and PNG/SVG (clipPath)/PDF exports match the canvas.
+- **Alignment & distribution** (Fix 1.38) — a single object inside a frame
+  aligns to the frame's edges/centers (all 6 controls); multiple objects
+  align to the selection bounds; rotated objects use their visual bounding
+  box. Distribute Horizontally/Vertically appears for 2+ selected (a no-op
+  with exactly 2, per Figma convention) and equalizes gaps between 3+.
+  All actions are single undo steps. The W/H inputs step by **whole
+  numbers** with the keyboard (Fix 1.40): Arrow ±1, Shift+Arrow ±5,
+  decimals preserved (34.11 → 35.11), clamped to 1–10000, resizing live
+  with one undo step per press; the ratio lock keeps the other axis in
+  sync.
 - **Object controls** — multi-select (marquee / shift-click), move, resize,
   duplicate (Ctrl/Cmd+D or **Alt+drag**), delete, lock, group/ungroup,
   z-order, align (6 ways), copy/paste, nudge with arrow keys.

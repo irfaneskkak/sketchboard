@@ -51,6 +51,9 @@ export interface SketchElement {
   seed: number;
   locked: boolean;
   groupId: string | null;
+  /** Persistent frame membership (Fix 1.39): set from the pointer position
+   * while dragging, at creation, or by migration. null = top-level. */
+  frameId?: string | null;
   /**
    * Rotation in degrees around the bounding-box center. Linear elements
    * (line/arrow/freedraw) bake rotation into their points instead.
@@ -317,10 +320,38 @@ export function normalizeDoc(doc: Doc): Doc {
       elements: [mainFrame(w, h, p.name), ...p.elements],
     };
   });
+  // Migration (Fix 1.39): docs that predate persistent frame membership get
+  // frameId derived once from each element's center (the old implicit rule).
+  const withMembership = migrated.map((p) => {
+    const frames = p.elements.filter((el) => el.type === 'frame');
+    return {
+      ...p,
+      elements: p.elements.map((el) => {
+        if (el.type === 'frame') return el.frameId === undefined ? { ...el, frameId: null } : el;
+        if (el.frameId !== undefined) return el;
+        let cx = el.x + el.width / 2;
+        let cy = el.y + el.height / 2;
+        if (el.points && el.points.length > 0) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const [px, py] of el.points) {
+            minX = Math.min(minX, px); minY = Math.min(minY, py);
+            maxX = Math.max(maxX, px); maxY = Math.max(maxY, py);
+          }
+          cx = el.x + (minX + maxX) / 2;
+          cy = el.y + (minY + maxY) / 2;
+        }
+        let fid: string | null = null;
+        for (const f of frames) {
+          if (cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height) fid = f.id;
+        }
+        return { ...el, frameId: fid };
+      }),
+    };
+  });
   return {
     ...doc,
     title: doc.title || 'Untitled document',
-    pages: migrated,
-    currentPage: Math.min(Math.max(0, doc.currentPage), migrated.length - 1),
+    pages: withMembership,
+    currentPage: Math.min(Math.max(0, doc.currentPage), withMembership.length - 1),
   };
 }

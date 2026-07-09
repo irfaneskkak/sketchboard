@@ -5,7 +5,7 @@ import type { Point, SketchElement } from './types';
 /* ----------------------------------- frames ---------------------------------- */
 
 /** Is the element's center inside the frame's bounds? */
-function centerInFrame(el: SketchElement, frame: SketchElement): boolean {
+export function centerInFrame(el: SketchElement, frame: SketchElement): boolean {
   const fb = getBounds(frame);
   const b = getAABB(el);
   const cx = b.x + b.w / 2;
@@ -14,23 +14,19 @@ function centerInFrame(el: SketchElement, frame: SketchElement): boolean {
 }
 
 /**
- * Expand a set of ids so frames carry their contents (elements whose center
- * lies inside the frame; nested frames expand recursively).
+ * Expand a set of ids so frames carry their contents. Membership is the
+ * element's stored frameId (Fix 1.39) — set by pointer position while
+ * dragging, not by geometric overlap.
  */
 export function withFrameContents(elements: SketchElement[], ids: Iterable<string>): Set<string> {
   const out = new Set(ids);
   let changed = true;
   while (changed) {
     changed = false;
-    for (const frame of elements) {
-      if (frame.type !== 'frame' || !out.has(frame.id)) continue;
-      for (const el of elements) {
-        if (el.id === frame.id || out.has(el.id)) continue;
-        if (centerInFrame(el, frame)) {
-          out.add(el.id);
-          changed = true;
-        }
-      }
+    for (const el of elements) {
+      if (out.has(el.id) || !el.frameId || !out.has(el.frameId)) continue;
+      out.add(el.id);
+      changed = true;
     }
   }
   return out;
@@ -111,6 +107,7 @@ export function cloneElements(source: SketchElement[], dx: number, dy: number): 
     }
     copy.startBinding = copy.startBinding && idMap.has(copy.startBinding) ? idMap.get(copy.startBinding)! : null;
     copy.endBinding = copy.endBinding && idMap.has(copy.endBinding) ? idMap.get(copy.endBinding)! : null;
+    if (copy.frameId && idMap.has(copy.frameId)) copy.frameId = idMap.get(copy.frameId)!;
     return copy;
   });
 }
@@ -161,13 +158,8 @@ function reorderList<T extends { id: string }>(items: T[], ids: Set<string>, act
 }
 
 function containingFrameId(el: SketchElement, elements: SketchElement[]): string | null {
-  if (el.type === 'frame') return null;
-  let frameId: string | null = null;
-  for (const frame of elements) {
-    if (frame.type !== 'frame' || frame.id === el.id) continue;
-    if (centerInFrame(el, frame)) frameId = frame.id;
-  }
-  return frameId;
+  if (el.type === 'frame' || !el.frameId) return null;
+  return elements.some((f) => f.id === el.frameId && f.type === 'frame') ? el.frameId : null;
 }
 
 export function reorderElements(elements: SketchElement[], ids: Set<string>, action: ZAction): SketchElement[] {
@@ -244,16 +236,31 @@ function selectedUnits(elements: SketchElement[], ids: Set<string>): ElementUnit
   return [...units.entries()].map(([key, members]) => ({
     key,
     members,
-    bounds: boundsUnion(members.map(getBounds)),
+    // Visual (rotation-aware) boxes: rotated objects align/distribute by
+    // what the user sees (Fix 1.38 §13).
+    bounds: boundsUnion(members.map(getAABB)),
   }));
 }
 
-/** Align selected elements; grouped elements move as a single unit. */
+/**
+ * Align selected elements; grouped elements move as a single unit.
+ * A single unit aligns to its parent frame's bounds (Fix 1.38); two or
+ * more units align to the selection bounds.
+ */
 export function alignElements(elements: SketchElement[], ids: Set<string>, action: AlignAction): SketchElement[] {
   const units = selectedUnits(elements, ids);
-  if (units.length < 2) return elements;
+  if (units.length === 0) return elements;
 
-  const overall = boundsUnion(units.map((unit) => unit.bounds));
+  let overall: ReturnType<typeof boundsUnion>;
+  if (units.length === 1) {
+    if (units[0].members.some((el) => el.type === 'frame')) return elements;
+    const fid = units[0].members[0].frameId;
+    const frame = fid ? elements.find((f) => f.id === fid && f.type === 'frame') : null;
+    if (!frame) return elements;
+    overall = getBounds(frame);
+  } else {
+    overall = boundsUnion(units.map((unit) => unit.bounds));
+  }
   const shifts = new Map<string, Point>();
   for (const { key, bounds: b } of units) {
     let dx = 0;

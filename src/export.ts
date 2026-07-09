@@ -9,7 +9,9 @@ import {
   LINE_HEIGHT,
   measureText,
   pageRenderBox,
+  clipFrameFor,
   renderElement,
+  renderElementClipped,
   renderPageToCanvas,
   textColorOf,
   wrapText,
@@ -399,12 +401,36 @@ function elementToSVG(el: SketchElement): string {
   return out;
 }
 
+/** SVG clipPath defs for every frame, plus a lookup used per element. */
+function frameClipDefs(page: Page): string {
+  const frames = page.elements.filter((el) => el.type === 'frame');
+  if (frames.length === 0) return '';
+  const defs = frames
+    .map((f) => {
+      const fb = getBounds(f);
+      const rot = f.rotation
+        ? ` transform="rotate(${f.rotation} ${fb.x + fb.w / 2} ${fb.y + fb.h / 2})"`
+        : '';
+      return `<clipPath id="clip-${esc(f.id)}"><rect x="${fb.x}" y="${fb.y}" width="${fb.w}" height="${fb.h}"${rot} /></clipPath>`;
+    })
+    .join('');
+  return `<defs>${defs}</defs>`;
+}
+
+/** Render an element, wrapped in its containing frame's clipPath (Fix 1.37). */
+function elementToClippedSVG(el: SketchElement, page: Page): string {
+  const svg = elementToSVG(el);
+  const frame = clipFrameFor(el, page.elements);
+  return frame ? `<g clip-path="url(#clip-${esc(frame.id)})">${svg}</g>` : svg;
+}
+
 export function pageToSVG(page: Page): string {
   const box = pageRenderBox(page);
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${box.w}" height="${box.h}" viewBox="${box.x} ${box.y} ${box.w} ${box.h}">`,
+    frameClipDefs(page),
     `<rect x="${box.x}" y="${box.y}" width="${box.w}" height="${box.h}" fill="#ffffff" />`,
-    ...page.elements.map(elementToSVG),
+    ...page.elements.map((el) => elementToClippedSVG(el, page)),
     '</svg>',
   ].join('\n');
 }
@@ -471,7 +497,7 @@ function renderFrameToCanvas(page: Page, frame: SketchElement, scale: number): H
   ctx.clip();
   for (const el of page.elements) {
     if (el.id === frame.id) continue;
-    renderElement(ctx, el);
+    renderElementClipped(ctx, el, page.elements);
   }
   ctx.restore();
   return canvas;
@@ -479,10 +505,14 @@ function renderFrameToCanvas(page: Page, frame: SketchElement, scale: number): H
 
 function frameToSVG(page: Page, frame: SketchElement): string {
   const fb = getBounds(frame);
-  const inner = page.elements.filter((el) => el.id !== frame.id).map(elementToSVG).join('\n');
+  const inner = page.elements
+    .filter((el) => el.id !== frame.id)
+    .map((el) => elementToClippedSVG(el, page))
+    .join('\n');
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${fb.w}" height="${fb.h}" viewBox="${fb.x} ${fb.y} ${fb.w} ${fb.h}">`,
     `<defs><clipPath id="frameclip"><rect x="${fb.x}" y="${fb.y}" width="${fb.w}" height="${fb.h}" /></clipPath></defs>`,
+    frameClipDefs(page),
     `<rect x="${fb.x}" y="${fb.y}" width="${fb.w}" height="${fb.h}" fill="${frame.fillColor === 'transparent' ? '#ffffff' : esc(frame.fillColor)}" />`,
     `<g clip-path="url(#frameclip)">${inner}</g>`,
     '</svg>',

@@ -139,6 +139,20 @@ kbd {
   display: block;
 }
 
+.beta-tag {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid rgba(77, 171, 247, 0.45);
+  background: rgba(77, 171, 247, 0.12);
+  border-radius: 999px;
+  padding: 1px 7px;
+  line-height: 1.5;
+  align-self: center;
+}
+
 .toolbar-btn {
   display: flex;
   align-items: center;

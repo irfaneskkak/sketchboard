@@ -1,4 +1,4 @@
-import { getAABB, getBounds, absPoints, clampCornerRadius, bezierTangent } from './geometry';
+import { getAABB, getBounds, absPoints, clampCornerRadius, bezierTangent, rotationRad } from './geometry';
 import { FONT_FAMILY, pageSize } from './types';
 import type { Page, Point, SketchElement, StrokeStyle } from './types';
 
@@ -688,6 +688,59 @@ export function renderElement(
  * into a canvas context. Assumes ctx is already transformed so that page
  * coordinate (0,0) maps to the paper's top-left corner at scale 1.
  */
+/* ----------------------------- frame clipping ------------------------------ */
+
+/**
+ * The frame that clips this element: its stored frameId (Fix 1.39 —
+ * membership follows the pointer while dragging, not geometric overlap).
+ */
+export function clipFrameFor(el: SketchElement, elements: SketchElement[]): SketchElement | null {
+  if (el.type === 'frame' || !el.frameId) return null;
+  return elements.find((f) => f.id === el.frameId && f.type === 'frame') ?? null;
+}
+
+/** Trace a frame's (possibly rotated) rectangle into the current path. */
+function frameClipPath(ctx: CanvasRenderingContext2D, frame: SketchElement) {
+  const fb = getBounds(frame);
+  const rad = rotationRad(frame);
+  ctx.beginPath();
+  if (rad) {
+    const cx = fb.x + fb.w / 2;
+    const cy = fb.y + fb.h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+    ctx.rect(fb.x, fb.y, fb.w, fb.h);
+    ctx.restore();
+  } else {
+    ctx.rect(fb.x, fb.y, fb.w, fb.h);
+  }
+}
+
+/**
+ * Render an element, clipped to its containing frame when it has one.
+ * Elements outside every frame render unclipped (Fix 1.37).
+ */
+export function renderElementClipped(
+  ctx: CanvasRenderingContext2D,
+  el: SketchElement,
+  elements: SketchElement[],
+  onImageLoad?: () => void,
+  frameLabelSize?: number
+) {
+  const frame = clipFrameFor(el, elements);
+  if (!frame) {
+    renderElement(ctx, el, onImageLoad, frameLabelSize);
+    return;
+  }
+  ctx.save();
+  frameClipPath(ctx, frame);
+  ctx.clip();
+  renderElement(ctx, el, onImageLoad, frameLabelSize);
+  ctx.restore();
+}
+
 export function renderPageContents(
   ctx: CanvasRenderingContext2D,
   page: Page,
@@ -701,7 +754,7 @@ export function renderPageContents(
   ctx.rect(0, 0, w, h);
   ctx.clip();
   for (const el of page.elements) {
-    renderElement(ctx, el, onImageLoad);
+    renderElementClipped(ctx, el, page.elements, onImageLoad);
   }
   ctx.restore();
 }
@@ -754,7 +807,7 @@ export function renderPageToCanvas(page: Page, scale: number): HTMLCanvasElement
     ctx.clip();
   }
   for (const el of page.elements) {
-    renderElement(ctx, el);
+    renderElementClipped(ctx, el, page.elements);
   }
   ctx.restore();
   return canvas;

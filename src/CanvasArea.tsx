@@ -39,8 +39,10 @@ import {
   getTextArea,
   isTextContainer,
   measureText,
+  clipFrameFor,
   pageRenderBox,
   renderElement,
+  renderElementClipped,
   renderPageContents,
   textBlockHeight,
   wrapText,
@@ -207,6 +209,8 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   const [view, setView] = useState<ViewState>({ zoom: 1, offsetX: 60, offsetY: 60 });
   const [marquee, setMarquee] = useState<Bounds | null>(null);
   const [bindHighlight, setBindHighlight] = useState<string | null>(null);
+  // Frame under a dragged selection — highlighted as the drop target (Fix 1.37).
+  const [dropFrame, setDropFrame] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [cursor, setCursor] = useState('default');
   const [, setRedrawTick] = useState(0);
@@ -334,13 +338,20 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   /* --------------------------- selection utilities -------------------------- */
 
   const isInsideLockedFrame = (el: SketchElement, els: SketchElement[]): boolean => {
-    if (el.type === 'frame') return false;
-    const [cx, cy] = boundsCenter(getBounds(el));
-    return els.some((frame) => {
-      if (frame.type !== 'frame' || !frame.locked || frame.id === el.id) return false;
-      const b = getBounds(frame);
-      return cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h;
-    });
+    if (el.type === 'frame' || !el.frameId) return false;
+    return els.some((frame) => frame.id === el.frameId && frame.type === 'frame' && frame.locked);
+  };
+
+  /** Topmost frame whose bounds contain the page point (Fix 1.39: the
+   * pointer decides frame membership while dragging/creating). */
+  const frameAtPoint = (els: SketchElement[], x: number, y: number): SketchElement | null => {
+    for (let i = els.length - 1; i >= 0; i--) {
+      const f = els[i];
+      if (f.type !== 'frame') continue;
+      const [lx, ly] = toLocalPoint(f, x, y);
+      if (pointInBounds(lx, ly, getBounds(f))) return f;
+    }
+    return null;
   };
 
   const unlockFrame = (id: string) => {
@@ -352,6 +363,15 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     setCtxMenu(null);
   };
 
+  /** Is the page point hidden by the element's clipping frame (Fix 1.37)?
+   * Clipped-away parts are not clickable. */
+  const hiddenByClip = (el: SketchElement, x: number, y: number, els: SketchElement[]): boolean => {
+    const frame = clipFrameFor(el, els);
+    if (!frame) return false;
+    const [lx, ly] = toLocalPoint(frame, x, y);
+    return !pointInBounds(lx, ly, getBounds(frame));
+  };
+
   const selectableAt = (x: number, y: number): SketchElement | null => {
     const els = getElements();
     const threshold = 6 / stateRef.current.view.zoom;
@@ -359,6 +379,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       if (els[i].locked) continue;
       if (isInsideLockedFrame(els[i], els)) continue;
       if (els[i].type === 'frame' && !frameTitleHitTest(els[i], x, y, threshold)) continue;
+      if (hiddenByClip(els[i], x, y, els)) continue;
       if (hitTest(els[i], x, y, threshold)) return els[i];
     }
     return null;
@@ -629,6 +650,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       y,
       width: 0,
       height: 0,
+      frameId: type === 'frame' ? null : frameAtPoint(getElements(), x, y)?.id ?? null,
       strokeColor: needsStroke && d.strokeColor === 'transparent' ? '#1e1e1e' : d.strokeColor,
       fillColor: type === 'sticky' ? d.stickyColor : d.fillColor,
       strokeWidth: d.strokeWidth,
@@ -791,6 +813,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       // frame itself (delete a frame via selection or its context menu).
       if (el.type === 'frame') continue;
       if (el.locked || !hitTest(el, x, y, threshold)) continue;
+      if (hiddenByClip(el, x, y, els)) continue;
       if (el.type === 'freedraw' && el.points && el.points.length > 2) {
         // Partial erase: drop points near the cursor, splitting the stroke.
         const radius = threshold + el.strokeWidth / 2 + 6;
@@ -1205,8 +1228,29 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
           if (!o || el.locked) return el;
           return { ...el, x: o.x + dx, y: o.y + dy };
         });
+        // The pointer decides frame membership while dragging (Fix 1.39):
+        // moved elements join the frame under the cursor — regardless of how
+        // much of the element overlaps it — and leave when the cursor leaves.
+        // Children of a frame that is itself being moved stay with their frame.
+        const movedIds = new Set(action.origEls.map((o) => o.id));
+        const hasLooseMoved = action.origEls.some(
+          (o) => o.type !== 'frame' && !(o.frameId && movedIds.has(o.frameId))
+        );
+        const target = hasLooseMoved
+          ? (() => {
+              const f = frameAtPoint(els.filter((el) => !movedIds.has(el.id)), px, py);
+              return f && !f.locked ? f : null;
+            })()
+          : null;
+        els = els.map((el) => {
+          if (!movedIds.has(el.id) || el.type === 'frame') return el;
+          if (el.frameId && movedIds.has(el.frameId)) return el;
+          const next = target?.id ?? null;
+          return (el.frameId ?? null) === next ? el : { ...el, frameId: next };
+        });
         els = updateBoundArrows(els);
         updateElements(els, false);
+        setDropFrame(target ? target.id : null);
         return;
       }
       case 'rotate': {
@@ -1401,6 +1445,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     actionRef.current = null;
     setMarquee(null);
     setBindHighlight(null);
+    setDropFrame(null);
     if (!action) return;
     const [px, py] = toPage(e.clientX, e.clientY);
 
@@ -1598,6 +1643,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       const el = els[i];
       if (el.locked) continue;
       if (isInsideLockedFrame(el, els)) continue;
+      if (hiddenByClip(el, x, y, els)) continue;
       const [lx, ly] = toLocalPoint(el, x, y);
       const b = getBounds(el);
       if (!pointInBounds(lx, ly, b)) continue;
@@ -1827,7 +1873,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     }
     if (infinite) {
       for (const el of renderPage.elements) {
-        renderElement(ctx, el, scheduleRedraw, 12 / zoom);
+        renderElementClipped(ctx, el, renderPage.elements, scheduleRedraw, 12 / zoom);
       }
     } else {
       // Frames are artboards: they and their contents render UNCLIPPED so a
@@ -1841,7 +1887,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
           scheduleRedraw
         );
         for (const el of renderPage.elements) {
-          if (frameSet.has(el.id)) renderElement(ctx, el, scheduleRedraw, 12 / zoom);
+          if (frameSet.has(el.id)) renderElementClipped(ctx, el, renderPage.elements, scheduleRedraw, 12 / zoom);
         }
       } else {
         renderPageContents(ctx, renderPage, scheduleRedraw);
@@ -1851,7 +1897,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     // In-progress element previews can extend past the paper edge; draw the
     // active element again unclipped so the user sees what they're dragging.
     const action = actionRef.current;
-    if (action && (action.type === 'draw' || action.type === 'draw-linear' || action.type === 'pencil')) {
+    if (!infinite && action && (action.type === 'draw' || action.type === 'draw-linear' || action.type === 'pencil')) {
       const el = page.elements.find((x) => x.id === action.id);
       if (el) renderElement(ctx, el, scheduleRedraw);
     }
@@ -2019,6 +2065,29 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       }
     }
 
+    if (dropFrame) {
+      // Solid accent outline + soft glow on the frame that would adopt the
+      // dragged elements (Fix 1.37 drag feedback).
+      const target = page.elements.find((el) => el.id === dropFrame);
+      if (target) {
+        const fb = getBounds(target);
+        ctx.save();
+        const rad = rotationRad(target);
+        if (rad) {
+          const [tcx, tcy] = boundsCenter(fb);
+          ctx.translate(tcx, tcy);
+          ctx.rotate(rad);
+          ctx.translate(-tcx, -tcy);
+        }
+        ctx.strokeStyle = ACCENT;
+        ctx.lineWidth = 2 / zoom;
+        ctx.shadowColor = 'rgba(77, 171, 247, 0.55)';
+        ctx.shadowBlur = 10 / zoom;
+        ctx.strokeRect(fb.x, fb.y, fb.w, fb.h);
+        ctx.restore();
+      }
+    }
+
     if (marquee) {
       ctx.fillStyle = 'rgba(77, 171, 247, 0.08)';
       ctx.fillRect(marquee.x, marquee.y, marquee.w, marquee.h);
@@ -2073,19 +2142,8 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     if (selEls.length > 0) {
       const primary = selEls[0];
       let frameEl = primary.type === 'frame' ? primary : undefined;
-      if (!frameEl) {
-        const pb = getAABB(primary);
-        const pcx = pb.x + pb.w / 2;
-        const pcy = pb.y + pb.h / 2;
-        for (let i = page.elements.length - 1; i >= 0; i--) {
-          const f = page.elements[i];
-          if (f.type !== 'frame') continue;
-          const fbb = getBounds(f);
-          if (pcx >= fbb.x && pcx <= fbb.x + fbb.w && pcy >= fbb.y && pcy <= fbb.y + fbb.h) {
-            frameEl = f;
-            break;
-          }
-        }
+      if (!frameEl && primary.frameId) {
+        frameEl = page.elements.find((f) => f.id === primary.frameId && f.type === 'frame');
       }
       if (frameEl) rulerFrame = getBounds(frameEl);
     }

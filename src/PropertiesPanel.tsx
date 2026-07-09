@@ -364,6 +364,9 @@ interface Props {
   onZOrder: (action: ZAction) => void;
   onAlign: (action: AlignAction) => void;
   onDistribute: (action: DistributeAction) => void;
+  /** Single non-frame selection whose center sits inside a frame: alignment
+   * targets the parent frame (Fix 1.38). */
+  singleInFrame: boolean;
   onResizeDimensions: (dimensions: { width?: number; height?: number }, commit?: boolean) => void;
   onResizeDimensionsEnd: () => void;
   ratioLocked: boolean;
@@ -510,6 +513,28 @@ function DimensionsControls({
 
   const onKeyDown = (axis: 'width' | 'height') => (e: KeyboardEvent<HTMLInputElement>) => {
     e.stopPropagation();
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      // Whole-number stepping that preserves the decimal part (Fix 1.40):
+      // 34.11 → 35.11, Shift steps by 5. The browser's own number stepping
+      // (which would give 34.12) is suppressed.
+      e.preventDefault();
+      const raw = axis === 'width' ? widthText : heightText;
+      const cur = Number(raw);
+      const base = Number.isFinite(cur) && raw.trim() !== '' ? cur : axis === 'width' ? width : height;
+      const step = (e.shiftKey ? 5 : 1) * (e.key === 'ArrowUp' ? 1 : -1);
+      const stepped = Math.round(Math.min(10000, Math.max(1, base + step)) * 100) / 100;
+      const next = dimensionsFor(axis, String(stepped));
+      if (!next) return;
+      if (next.width !== undefined) setWidthText(formatDimension(next.width));
+      if (next.height !== undefined) setHeightText(formatDimension(next.height));
+      if (liveEditRef.current) {
+        // Close a live typing gesture before committing the discrete step.
+        liveEditRef.current = false;
+        onResizeDimensionsEnd();
+      }
+      onResizeDimensions(next, true); // discrete: each press is one undo step
+      return;
+    }
     if (e.key === 'Enter') {
       e.currentTarget.blur();
     } else if (e.key === 'Escape') {
@@ -639,7 +664,7 @@ export function PropertiesPanel(props: Props) {
       {hasSelection && (
         <section className="position-section">
           <h4>Position</h4>
-          {selected.length >= 2 && (
+          {(selected.length >= 2 || props.singleInFrame) && (
             <>
               <div className="section-subtitle">Alignment</div>
               <div className="alignment-controls position-toolbar">
@@ -665,7 +690,7 @@ export function PropertiesPanel(props: Props) {
                     {Icons.alignBottom}
                   </button>
                 </div>
-                {selected.length >= 3 && (
+                {selected.length >= 2 && (
                   <div className="alignment-group" aria-label="Distribution">
                     <button className="icon-btn" onClick={() => props.onDistribute('horizontal')} title="Distribute horizontally">
                       {Icons.distributeHorizontal}

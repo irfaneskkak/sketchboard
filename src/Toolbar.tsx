@@ -83,6 +83,7 @@ export function Toolbar(props: Props) {
     <div className="toolbar">
       <div className="toolbar-group brand">
         <img className="app-logo" src={logoWhite} alt="Sketchboard" />
+        <span className="beta-tag">Beta</span>
       </div>
 
       <div className="toolbar-group">

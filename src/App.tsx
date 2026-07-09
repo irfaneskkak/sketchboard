@@ -172,6 +172,16 @@ export default function App() {
     selection.includes(el.id)
   );
 
+  // Single non-frame object inside a frame: the panel offers frame-relative
+  // alignment (Fix 1.38).
+  const singleInFrame =
+    selectedElements.length === 1 &&
+    selectedElements[0].type !== 'frame' &&
+    !!selectedElements[0].frameId &&
+    doc.pages[doc.currentPage].elements.some(
+      (f) => f.type === 'frame' && f.id === selectedElements[0].frameId
+    );
+
   /* ----------------------------- aspect-ratio lock ---------------------------- */
 
   // Shared between the Dimensions inputs and canvas handle resizing
@@ -734,10 +744,17 @@ export default function App() {
           const h = img.height * scale;
           const cx = at ? at[0] : pw / 2;
           const cy = at ? at[1] : ph / 2;
+          let frameId: string | null = null;
+          for (const f of currentElements()) {
+            if (f.type !== 'frame') continue;
+            const b = getBounds(f);
+            if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) frameId = f.id;
+          }
           const offset = added.length * 20;
           added.push({
             id: uid(),
             type: 'image',
+            frameId,
             x: cx - w / 2 + offset,
             y: cy - h / 2 + offset,
             width: w,
@@ -1118,6 +1135,7 @@ export default function App() {
           onUngroup={ungroupSelection}
           onZOrder={zOrder}
           onAlign={align}
+          singleInFrame={singleInFrame}
           onDistribute={distribute}
           onResizeDimensions={resizeDimensions}
           onResizeDimensionsEnd={endGesture}
