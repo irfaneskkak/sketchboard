@@ -247,7 +247,18 @@ function PaintRow({
                     onStyle({ [opKey]: Math.min(100, Math.max(0, Math.round(v))) } as StylePatch);
                   }
                 }}
-                onKeyDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  // Custom stepping (Opacity Value Change): ±1, Shift = ±10 —
+                  // never the browser's native (inconsistent) number stepping.
+                  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    const step = (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1);
+                    onStyle({
+                      [opKey]: Math.min(100, Math.max(0, Math.round(opacity) + step)),
+                    } as StylePatch);
+                  }
+                }}
                 aria-label={`${title} opacity percent`}
               />
               <span className="paint-pct">%</span>
@@ -280,12 +291,16 @@ function PaintRow({
 function TextColorRow({
   color,
   mixed,
+  opacity,
+  hasSelection,
   onStyle,
   onStyleLive,
   onStyleEnd,
 }: {
   color: string;
   mixed: boolean;
+  opacity: number;
+  hasSelection: boolean;
   onStyle: (patch: StylePatch) => void;
   onStyleLive: (patch: StylePatch) => void;
   onStyleEnd: () => void;
@@ -340,6 +355,33 @@ function TextColorRow({
         onBlur={commitHex}
         aria-label="Text hex color"
       />
+      {hasSelection && (
+        <>
+          <input
+            className="paint-opacity"
+            type="number"
+            min={0}
+            max={100}
+            value={Math.round(opacity)}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) {
+                onStyle({ opacity: Math.min(100, Math.max(0, Math.round(v))) });
+              }
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                e.preventDefault();
+                const step = (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1);
+                onStyle({ opacity: Math.min(100, Math.max(0, Math.round(opacity) + step)) });
+              }
+            }}
+            aria-label="Text opacity percent"
+          />
+          <span className="paint-pct">%</span>
+        </>
+      )}
     </div>
   );
 }
@@ -642,6 +684,18 @@ export function PropertiesPanel(props: Props) {
   ]);
   const showFill = hasSelection ? selected.every((el) => FILLABLE.has(el.type)) : FILL_TOOLS.has(tool);
   const showStroke = hasSelection ? selected.every((el) => STROKEABLE.has(el.type)) : STROKE_TOOLS.has(tool);
+  // Stroke width/style appear only while a stroke is actually active
+  // (Stroke width slide logic): linear elements always have one; other
+  // shapes need a non-transparent, visible stroke paint.
+  const strokeActive = (el: SketchElement) =>
+    el.type === 'line' ||
+    el.type === 'arrow' ||
+    el.type === 'freedraw' ||
+    (el.strokeColor !== 'transparent' && el.strokeVisible !== false);
+  const hasActiveStroke = hasSelection
+    ? selected.some((el) => STROKEABLE.has(el.type) && strokeActive(el))
+    : tool === 'line' || tool === 'arrow' || tool === 'pencil' ||
+      (STROKE_TOOLS.has(tool) && defaults.strokeColor !== 'transparent');
   const showOpacity = hasSelection || DRAW_TOOLS.has(tool);
   const panelEmpty = !hasSelection && !showFill && !showStroke && !showFont && !showOpacity;
 
@@ -776,7 +830,7 @@ export function PropertiesPanel(props: Props) {
         />
       )}
 
-      {showStroke && (
+      {showStroke && hasActiveStroke && (
         <section>
           <h4>Stroke width · {Math.round(current.strokeWidth * 10) / 10}px</h4>
           <input
@@ -793,7 +847,7 @@ export function PropertiesPanel(props: Props) {
         </section>
       )}
 
-      {showStroke && (
+      {showStroke && hasActiveStroke && (
         <section>
           <h4>Stroke style</h4>
           <div className="btn-row">
@@ -859,6 +913,16 @@ export function PropertiesPanel(props: Props) {
             value={current.opacity}
             onChange={(e) => onStyleLive({ opacity: Number(e.target.value) })}
             onPointerUp={onStyleEnd}
+            onKeyDown={(e) => {
+              // ±1 per arrow, Shift = ±10 (Opacity Value Change).
+              if (e.key.startsWith('Arrow')) {
+                e.preventDefault();
+                e.stopPropagation();
+                const dir = e.key === 'ArrowUp' || e.key === 'ArrowRight' ? 1 : -1;
+                const step = (e.shiftKey ? 10 : 1) * dir;
+                onStyle({ opacity: Math.min(100, Math.max(10, Math.round(current.opacity) + step)) });
+              }
+            }}
             onKeyUp={onStyleEnd}
             aria-label="Opacity"
           />
@@ -879,6 +943,8 @@ export function PropertiesPanel(props: Props) {
                   (el) => (el.textColor ?? defaults.textColor) !== (first.textColor ?? defaults.textColor)
                 )
               }
+              opacity={current.opacity}
+              hasSelection={hasSelection}
               onStyle={onStyle}
               onStyleLive={onStyleLive}
               onStyleEnd={onStyleEnd}

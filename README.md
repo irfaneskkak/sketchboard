@@ -104,14 +104,22 @@ workspace path contains `:` characters, which break `PATH` lookups.
   swatch (opens the advanced picker: hue + saturation/value wheel, HEX,
   recents), inline HEX field, per-paint opacity %, an eye toggle that hides
   a paint without losing its color, minus to remove and + to add; mixed
-  selections show "Mixed". New shapes default to solid `#D9D9D9` fill with
+  selections show "Mixed". Opacity inputs step predictably from the
+  keyboard (Opacity Value Change): Arrow ±1, Shift+Arrow ±10, clamped
+  0–100 with custom handling (no inconsistent native number stepping) —
+  the same for the object Opacity slider. New shapes default to solid `#D9D9D9` fill with
   no stroke, and a **Triangle** tool (`Y`) joins the toolbar with full shape
   behavior including contained text and a single internal corner-radius dot
   (drag to round all three corners evenly, live label, panel sync — Fix
   1.26). The sidebar is **context-aware** (Fix 1.26): sections render only
   when every selected element supports them (no Fill for lines/text, no
   stroke controls for text/images, etc.), tools show their own defaults,
-  and an empty selection shows a minimal empty state;
+  and an empty selection shows a minimal empty state. **Stroke width and
+  stroke style appear only while a stroke is active** (Stroke width slide
+  logic): removing or eye-hiding the stroke hides them instantly (the
+  Stroke row keeps its + button), re-adding restores them, lines/arrows
+  always show them, and multi-selections show them when at least one
+  member has an active stroke;
   a 1–20 px stroke-width slider, opacity, and alignment. **No fill** and
   **No stroke** slash swatches remove fill/border (lines, arrows, and pencil
   strokes always keep a visible stroke). Text has an independent **text
