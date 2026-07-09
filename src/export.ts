@@ -163,6 +163,26 @@ function containedTextSVG(el: SketchElement): string {
   return svgTextLines(layout.lines, area.x, area.y + layout.offsetY, area.w, fontSize, textColorOf(el), el.textAlign ?? 'center');
 }
 
+/** SVG path for a polygon with rounded corners (quadratic corner cuts). */
+function roundedPolySVG(verts: Point[], r: number): string {
+  if (r <= 0) return `M ${verts.map((v) => v.join(' ')).join(' L ')} Z`;
+  const n = verts.length;
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    const prev = verts[(i - 1 + n) % n];
+    const curr = verts[i];
+    const next = verts[(i + 1) % n];
+    const inLen = Math.hypot(curr[0] - prev[0], curr[1] - prev[1]);
+    const outLen = Math.hypot(next[0] - curr[0], next[1] - curr[1]);
+    const rIn = Math.min(r, inLen / 2);
+    const rOut = Math.min(r, outLen / 2);
+    const p1 = [curr[0] - ((curr[0] - prev[0]) / inLen) * rIn, curr[1] - ((curr[1] - prev[1]) / inLen) * rIn];
+    const p2 = [curr[0] + ((next[0] - curr[0]) / outLen) * rOut, curr[1] + ((next[1] - curr[1]) / outLen) * rOut];
+    d += `${i === 0 ? `M ${p1[0]} ${p1[1]}` : ` L ${p1[0]} ${p1[1]}`} Q ${curr[0]} ${curr[1]} ${p2[0]} ${p2[1]}`;
+  }
+  return `${d} Z`;
+}
+
 /** Two <line> strokes forming an arrowhead pointing along `angle` at `to`. */
 function svgArrowhead(el: SketchElement, to: Point, angle: number): string {
   const size = 8 + el.strokeWidth * 3;
@@ -382,9 +402,26 @@ function elementToSVG(el: SketchElement): string {
           if (m.type === 'ellipse') {
             shape = `<ellipse cx="${b.x + b.w / 2}" cy="${b.y + b.h / 2}" rx="${b.w / 2}" ry="${b.h / 2}" />`;
           } else if (m.type === 'diamond') {
-            shape = `<polygon points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h / 2} ${b.x + b.w / 2},${b.y + b.h} ${b.x},${b.y + b.h / 2}" />`;
+            const dr = Math.min(m.cornerRadius ?? 0, Math.min(b.w, b.h) / 2);
+            shape = `<path d="${roundedPolySVG(
+              [
+                [b.x + b.w / 2, b.y],
+                [b.x + b.w, b.y + b.h / 2],
+                [b.x + b.w / 2, b.y + b.h],
+                [b.x, b.y + b.h / 2],
+              ],
+              dr
+            )}" />`;
           } else if (m.type === 'triangle') {
-            shape = `<polygon points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" />`;
+            const tr = Math.min(m.cornerRadius ?? 0, Math.min(b.w, b.h) * 0.25);
+            shape = `<path d="${roundedPolySVG(
+              [
+                [b.x + b.w / 2, b.y],
+                [b.x + b.w, b.y + b.h],
+                [b.x, b.y + b.h],
+              ],
+              tr
+            )}" />`;
           } else {
             const rx = Math.min(m.cornerRadius ?? 0, Math.min(b.w, b.h) / 2);
             shape = `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"${rx > 0 ? ` rx="${rx}"` : ''} />`;

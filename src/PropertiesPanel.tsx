@@ -1008,17 +1008,25 @@ export function PropertiesPanel(props: Props) {
 
           <LinkSection currentLink={first?.link ?? null} onSetLink={props.onSetLink} />
 
-          {/* Corner Radius — shown for rectangles / diamonds */}
-          {selected.length === 1 && (first?.type === 'rectangle' || first?.type === 'diamond' || first?.type === 'triangle') && (
+          {/* Corner Radius — shapes and clipping-mask shapes alike */}
+          {selected.length === 1 &&
+            first &&
+            (first.type === 'rectangle' ||
+              first.type === 'diamond' ||
+              first.type === 'triangle' ||
+              (first.type === 'image' && first.mask && first.mask.type !== 'ellipse')) && (
             <section>
-              <h4>Corner radius · {Math.round(first.cornerRadius ?? 0)}px</h4>
+              <h4>
+                Corner radius ·{' '}
+                {Math.round((first.type === 'image' ? first.mask?.cornerRadius : first.cornerRadius) ?? 0)}px
+              </h4>
               <div className="font-size-row">
                 <input
                   className="font-size-input"
                   type="number"
                   min={0}
                   max={Math.round(Math.min(first.width, first.height) / 2)}
-                  value={Math.round(first.cornerRadius ?? 0)}
+                  value={Math.round((first.type === 'image' ? first.mask?.cornerRadius : first.cornerRadius) ?? 0)}
                   aria-label="Corner radius"
                   onChange={(e) => {
                     const v = Number(e.target.value);
@@ -1033,7 +1041,13 @@ export function PropertiesPanel(props: Props) {
                 min="0"
                 max={Math.round(Math.min(first.width, first.height) / 2)}
                 step="1"
-                value={Math.round(clampCornerRadius(first.cornerRadius ?? 0, first.width, first.height))}
+                value={Math.round(
+                  clampCornerRadius(
+                    (first.type === 'image' ? first.mask?.cornerRadius : first.cornerRadius) ?? 0,
+                    first.width,
+                    first.height
+                  )
+                )}
                 onChange={(e) => onStyleLive({ cornerRadius: Number(e.target.value) })}
                 onPointerUp={onStyleEnd}
                 onKeyUp={onStyleEnd}

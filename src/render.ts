@@ -492,13 +492,29 @@ export function maskShapePath(ctx: CanvasRenderingContext2D, el: SketchElement) 
     case 'ellipse':
       ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
       break;
-    case 'diamond':
-      ctx.moveTo(b.x + b.w / 2, b.y);
-      ctx.lineTo(b.x + b.w, b.y + b.h / 2);
-      ctx.lineTo(b.x + b.w / 2, b.y + b.h);
-      ctx.lineTo(b.x, b.y + b.h / 2);
-      ctx.closePath();
+    case 'diamond': {
+      const cr = clampCornerRadius(m.cornerRadius ?? 0, b.w, b.h);
+      const verts: Point[] = [
+        [b.x + b.w / 2, b.y],
+        [b.x + b.w, b.y + b.h / 2],
+        [b.x + b.w / 2, b.y + b.h],
+        [b.x, b.y + b.h / 2],
+      ];
+      if (cr > 0) {
+        ctx.moveTo((verts[3][0] + verts[0][0]) / 2, (verts[3][1] + verts[0][1]) / 2);
+        for (let i = 0; i < 4; i++) {
+          ctx.arcTo(verts[i][0], verts[i][1], verts[(i + 1) % 4][0], verts[(i + 1) % 4][1], cr);
+        }
+        ctx.closePath();
+      } else {
+        ctx.moveTo(verts[0][0], verts[0][1]);
+        ctx.lineTo(verts[1][0], verts[1][1]);
+        ctx.lineTo(verts[2][0], verts[2][1]);
+        ctx.lineTo(verts[3][0], verts[3][1]);
+        ctx.closePath();
+      }
       break;
+    }
     case 'triangle': {
       const cr = Math.min(clampCornerRadius(m.cornerRadius ?? 0, b.w, b.h), Math.min(b.w, b.h) * 0.25);
       const pts: [number, number][] = [

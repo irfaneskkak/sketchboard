@@ -221,7 +221,13 @@ workspace path contains `:` characters, which break `PATH` lookups.
   `Cmd/Ctrl+Alt+7` (or the panel's "Release mask") splits it back into the
   original image and shape with their styles intact. Helpful toasts guide
   invalid selections; masks survive undo/redo, duplication, frames, and
-  export to PNG/SVG (shape clipPath)/PDF. Mask **edit mode** (Fix 1.44.1)
+  export to PNG/SVG (shape clipPath)/PDF. Mask shapes stay fully editable
+  (Clipmask Fix 1.0): the orange **corner-radius dot** and the sidebar
+  Corner radius control keep working after a rectangle/diamond/triangle
+  becomes a mask — dragging rounds the clip path live without touching
+  the image transform, rounded diamond/triangle masks render and export
+  with true rounded paths, and releasing the mask restores the shape with
+  its latest radius. Mask **edit mode** (Fix 1.44.1)
   makes the shape unmistakable: the full image shows dimmed with the mask
   path as a clear bright window, a solid blue outline traces the actual
   shape (triangle, ellipse, …), and a dotted blue rectangle marks the full

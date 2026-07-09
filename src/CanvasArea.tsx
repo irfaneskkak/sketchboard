@@ -774,16 +774,32 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   /** World position of the corner-radius drag handle on a shape. */
   /** Extra inset that keeps the triangle's radius dot inside the shape. */
   const TRIANGLE_CR_INSET = 22;
+  const RECTANGLE_CR_INSET = 12;
+
+  /** The radius-capable shape behind an element: plain shapes, or the mask
+   * shape of a clipped image (Clipmask Fix 1.0). */
+  const radiusShapeOf = (
+    el: SketchElement
+  ): { shape: 'rectangle' | 'diamond' | 'triangle'; cr: number } | null => {
+    if (el.type === 'rectangle' || el.type === 'diamond' || el.type === 'triangle') {
+      return { shape: el.type, cr: el.cornerRadius ?? 0 };
+    }
+    if (el.type === 'image' && el.mask && el.mask.type !== 'ellipse') {
+      return { shape: el.mask.type, cr: el.mask.cornerRadius ?? 0 };
+    }
+    return null;
+  };
 
   const cornerRadiusHandlePos = (el: SketchElement): Point | null => {
-    if (el.type !== 'rectangle' && el.type !== 'diamond' && el.type !== 'triangle') return null;
+    const spec = radiusShapeOf(el);
+    if (!spec) return null;
     const b = getBounds(el);
-    const cr = clampCornerRadius(el.cornerRadius ?? 0, b.w, b.h);
+    const cr = clampCornerRadius(spec.cr, b.w, b.h);
     // Place the dot at the top-left rounded corner offset.
-    if (el.type === 'rectangle') {
-      return [b.x + cr, b.y + cr];
+    if (spec.shape === 'rectangle') {
+      return [b.x + cr + RECTANGLE_CR_INSET, b.y + cr + RECTANGLE_CR_INSET];
     }
-    if (el.type === 'triangle') {
+    if (spec.shape === 'triangle') {
       // One internal dot, centered under the apex (Fix 1.26).
       return [b.x + b.w / 2, b.y + TRIANGLE_CR_INSET + cr];
     }
@@ -795,7 +811,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const { selection: sel } = stateRef.current;
     if (sel.length !== 1) return null;
     const el = getElements().find((e) => e.id === sel[0]);
-    if (!el || (el.type !== 'rectangle' && el.type !== 'diamond' && el.type !== 'triangle')) return null;
+    if (!el || !radiusShapeOf(el)) return null;
     const pos = cornerRadiusHandlePos(el);
     if (!pos) return null;
     const [px, py] = toPage(clientX, clientY);
@@ -1298,13 +1314,15 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       const crEl = cornerRadiusHandleAt(e.clientX, e.clientY);
       if (crEl) {
         const b = getBounds(crEl);
+        const spec = radiusShapeOf(crEl);
+        const shapeKind = spec?.shape ?? crEl.type;
         startGesture();
         actionRef.current = {
           type: 'corner-radius',
           id: crEl.id,
           origEl: JSON.parse(JSON.stringify(crEl)),
-          cornerX: crEl.type === 'rectangle' ? b.x : b.x + b.w / 2,
-          cornerY: b.y,
+          cornerX: shapeKind === 'rectangle' ? b.x + RECTANGLE_CR_INSET : b.x + b.w / 2,
+          cornerY: shapeKind === 'rectangle' ? b.y + RECTANGLE_CR_INSET : b.y,
         };
         return;
       }
@@ -1959,14 +1977,21 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         const [lx, ly] = action.origEl.rotation
           ? rotatePoint([px, py], boundsCenter(getBounds(action.origEl)), -rotationRad(action.origEl))
           : [px, py];
+        const spec = radiusShapeOf(action.origEl);
+        const shapeKind = spec?.shape ?? action.origEl.type;
         let dist = Math.hypot(lx - action.cornerX, ly - action.cornerY);
-        if (action.origEl.type === 'triangle') dist = Math.max(0, dist - TRIANGLE_CR_INSET);
+        if (shapeKind === 'triangle') dist = Math.max(0, dist - TRIANGLE_CR_INSET);
+        if (shapeKind === 'rectangle') dist = dist / Math.SQRT2;
         const b = getBounds(action.origEl);
         let clamped = clampCornerRadius(dist, b.w, b.h);
         // Triangles round more conservatively so corners never overlap.
-        if (action.origEl.type === 'triangle') clamped = Math.min(clamped, Math.min(b.w, b.h) * 0.25);
+        if (shapeKind === 'triangle') clamped = Math.min(clamped, Math.min(b.w, b.h) * 0.25);
         const els = getElements().map((el) =>
-          el.id === action.id ? { ...el, cornerRadius: clamped } : el
+          el.id === action.id
+            ? el.type === 'image' && el.mask
+              ? { ...el, mask: { ...el.mask, cornerRadius: clamped } }
+              : { ...el, cornerRadius: clamped }
+            : el
         );
         updateElements(els, false);
         // Show radius label near cursor.
@@ -2851,8 +2876,9 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
 
       if (!editing) drawSelectionSizeBadge(ctx, frameB, frameRot, zoom);
 
-      // Corner-radius handle: small orange circle inside the shape.
-      if (selEls.length === 1 && (selEls[0].type === 'rectangle' || selEls[0].type === 'diamond' || selEls[0].type === 'triangle')) {
+      // Corner-radius handle: small orange circle inside the shape — also
+      // for clipping-mask shapes (Clipmask Fix 1.0).
+      if (selEls.length === 1 && radiusShapeOf(selEls[0])) {
         const crEl = selEls[0];
         const crPos = cornerRadiusHandlePos(crEl);
         if (crPos) {

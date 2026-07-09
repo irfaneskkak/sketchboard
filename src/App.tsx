@@ -915,6 +915,10 @@ export default function App() {
         const isLinear = e.type === 'line' || e.type === 'arrow' || e.type === 'freedraw';
         if (patch.strokeColor === 'transparent' && isLinear) return e;
         const next = { ...e, ...patch };
+        if (patch.cornerRadius !== undefined && e.type === 'image' && e.mask) {
+          // Clipped images keep their radius on the mask shape (Clipmask Fix 1.0).
+          next.mask = { ...e.mask, cornerRadius: patch.cornerRadius };
+        }
         if (patch.rotation !== undefined && e.points) {
           // Linear elements bake rotation into points; the angle input skips them.
           next.rotation = e.rotation;
