@@ -424,6 +424,10 @@ interface Props {
   /** Clip the selected image into the topmost selected shape (Fix 1.45.4
    * menu fallback for browsers that reserve Cmd/Ctrl+7). */
   onMakeMask: () => void;
+  /** Does the current page contain any frame? Gates the empty-state
+   * "Create a frame" preset panel (Frame Visibility fix). */
+  hasFrames: boolean;
+  onCreateFrame: (name: string, w: number, h: number) => void;
   onSetFrameName: (id: string, name: string) => void;
   onExportFrame: (format: 'png' | 'svg' | 'pdf') => void;
   onSetFrameOrientation: (orientation: 'portrait' | 'landscape') => void;
@@ -640,6 +644,210 @@ function DimensionsControls({
   );
 }
 
+const SIDEBAR_FRAME_PRESETS: { group: string; items: { name: string; w: number; h: number }[] }[] = [
+  {
+    group: 'Document',
+    items: [
+      { name: 'A4 Portrait', w: 794, h: 1123 },
+      { name: 'A3 Portrait', w: 1123, h: 1587 },
+    ],
+  },
+  {
+    group: 'Presentation',
+    items: [
+      { name: '16:9', w: 1920, h: 1080 },
+      { name: '4:3', w: 1024, h: 768 },
+    ],
+  },
+  {
+    group: 'Desktop',
+    items: [
+      { name: 'Desktop', w: 1440, h: 1024 },
+      { name: 'Laptop', w: 1366, h: 768 },
+      { name: 'Full HD', w: 1920, h: 1080 },
+    ],
+  },
+  {
+    group: 'Mobile',
+    items: [
+      { name: 'iPhone', w: 390, h: 844 },
+      { name: 'Android', w: 360, h: 800 },
+      { name: 'Large Mobile', w: 430, h: 932 },
+    ],
+  },
+  {
+    group: 'Tablet',
+    items: [
+      { name: 'Tablet Portrait', w: 768, h: 1024 },
+      { name: 'Tablet Landscape', w: 1024, h: 768 },
+    ],
+  },
+  {
+    group: 'Social',
+    items: [
+      { name: 'Instagram Post', w: 1080, h: 1080 },
+      { name: 'Instagram Story', w: 1080, h: 1920 },
+      { name: 'LinkedIn Post', w: 1200, h: 1200 },
+      { name: 'LinkedIn Banner', w: 1584, h: 396 },
+      { name: 'YouTube Thumbnail', w: 1280, h: 720 },
+      { name: 'Facebook Post', w: 1200, h: 630 },
+      { name: 'X Post', w: 1600, h: 900 },
+    ],
+  },
+];
+
+/** Empty-page helper: preset list + custom size (Frame Visibility fix). */
+function FramePresetsPanel({ onCreate }: { onCreate: (name: string, w: number, h: number) => void }) {
+  // Accordion state (Frame Visibility 1.1): all categories collapsed by
+  // default; multiple may be open at once.
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
+  const toggleGroup = (g: string) =>
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      return next;
+    });
+  const [cw, setCw] = useState('1080');
+  const [ch, setCh] = useState('1080');
+  const [error, setError] = useState<string | null>(null);
+
+  const customValid = (() => {
+    const w = Number(cw);
+    const h = Number(ch);
+    return (
+      cw.trim() !== '' && ch.trim() !== '' &&
+      Number.isFinite(w) && Number.isFinite(h) &&
+      w >= 100 && h >= 100 && w <= 10000 && h <= 10000
+    );
+  })();
+
+  const createCustom = () => {
+    if (!customValid) {
+      const w = Number(cw);
+      const h = Number(ch);
+      setError(
+        cw.trim() === '' || ch.trim() === ''
+          ? 'Enter width and height.'
+          : w < 100 || h < 100
+            ? 'Minimum size is 100px.'
+            : 'Enter sizes between 100 and 10000.'
+      );
+      return;
+    }
+    setError(null);
+    onCreate('Custom Frame', Math.round(Number(cw)), Math.round(Number(ch)));
+  };
+
+  /** Enter creates; arrows step ±1 (Shift ±10), clamped 100–10000. */
+  const customKeys = (value: string, set: (v: string) => void) => (e: KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      createCustom();
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const base = Number(value);
+      const cur = Number.isFinite(base) && value.trim() !== '' ? base : 100;
+      const step = (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1);
+      set(String(Math.min(10000, Math.max(100, Math.round(cur) + step))));
+      setError(null);
+    }
+  };
+
+  return (
+    <div className="sidebar-frame-presets" aria-label="Create a frame">
+      <h4>Create a frame</h4>
+      <p className="sidebar-presets-hint">
+        Choose a preset to start designing, or create a custom frame size.
+      </p>
+      {SIDEBAR_FRAME_PRESETS.map((g) => (
+        <div key={g.group} className="frame-preset-group">
+          <button
+            className="preset-category-header"
+            aria-expanded={openGroups.has(g.group)}
+            aria-controls={`presets-${g.group.toLowerCase()}`}
+            onClick={() => toggleGroup(g.group)}
+          >
+            <span>{g.group}</span>
+            {openGroups.has(g.group) ? Icons.minus : Icons.plus}
+          </button>
+          {openGroups.has(g.group) && (
+            <div id={`presets-${g.group.toLowerCase()}`}>
+              {g.items.map((it) => (
+                <button
+                  key={it.name}
+                  className="frame-preset-row"
+                  onClick={() => onCreate(it.name, it.w, it.h)}
+                >
+                  <span>{it.name}</span>
+                  <span className="frame-preset-size">
+                    {it.w} × {it.h}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="frame-preset-group">
+        <button
+          className="preset-category-header"
+          aria-expanded={openGroups.has('Custom')}
+          aria-controls="presets-custom"
+          onClick={() => toggleGroup('Custom')}
+        >
+          <span>Custom</span>
+          {openGroups.has('Custom') ? Icons.minus : Icons.plus}
+        </button>
+        {openGroups.has('Custom') && (
+          <div id="presets-custom" className="frame-custom-form">
+            <div className="custom-size-inputs">
+              <label className="custom-size-field">
+                <span>W</span>
+                <input
+                  type="number"
+                  min={100}
+                  max={10000}
+                  placeholder="W"
+                  value={cw}
+                  aria-label="Custom frame width"
+                  onChange={(e) => {
+                    setCw(e.target.value);
+                    setError(null);
+                  }}
+                  onKeyDown={customKeys(cw, setCw)}
+                />
+              </label>
+              <label className="custom-size-field">
+                <span>H</span>
+                <input
+                  type="number"
+                  min={100}
+                  max={10000}
+                  placeholder="H"
+                  value={ch}
+                  aria-label="Custom frame height"
+                  onChange={(e) => {
+                    setCh(e.target.value);
+                    setError(null);
+                  }}
+                  onKeyDown={customKeys(ch, setCh)}
+                />
+              </label>
+            </div>
+            {error && <div className="link-error">{error}</div>}
+            <button className="chip custom-create-btn" disabled={!customValid} onClick={createCustom}>
+              Create frame
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function PropertiesPanel(props: Props) {
   const { defaults, tool, onStyle, onStyleLive, onStyleEnd } = props;
   const allSelected = props.selected;
@@ -725,7 +933,9 @@ export function PropertiesPanel(props: Props) {
         </section>
       )}
 
-      {panelEmpty && (
+      {panelEmpty && !props.hasFrames && <FramePresetsPanel onCreate={props.onCreateFrame} />}
+
+      {panelEmpty && props.hasFrames && (
         <div className="panel-empty">Select an object to edit its properties.</div>
       )}
 

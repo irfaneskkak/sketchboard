@@ -1518,6 +1518,8 @@ export default function App() {
           onImageFit={imageFit}
           onReleaseMask={releaseClippingMask}
           onMakeMask={makeClippingMask}
+          hasFrames={doc.pages[doc.currentPage].elements.some((el) => el.type === 'frame')}
+          onCreateFrame={(name, w, h) => canvasRef.current?.createFrameAtCenter(name, w, h)}
           onSetFrameName={setFrameName}
           onExportFrame={exportSelectedFrame}
           onSetFrameOrientation={setFrameOrientation}

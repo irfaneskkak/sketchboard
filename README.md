@@ -148,6 +148,14 @@ workspace path contains `:` characters, which break `PATH` lookups.
   show a ↗ badge when selected or hovered that opens the URL; links export
   as clickable PDF annotations and SVG anchors, and survive save/duplicate/
   copy/import.
+- **Empty-page frame presets** (Frame Visibility fix) — when the current
+  page has no frames and nothing is selected, the right sidebar shows a
+  "Create a frame" panel with grouped presets (Document, Presentation,
+  Desktop, Mobile, Tablet, Social) as collapsible accordion categories —
+  all collapsed by default with +/− toggles, multiple open at once
+  (Frame Visibility 1.1) — plus a validated custom size. Clicking
+  one creates the frame centered in the viewport (auto-zoomed to fit),
+  auto-named and selected; the panel disappears once a frame exists.
 - **Frames** (Fix 1.17) — multiple named artboards inside one page for screen
   flows. The Frame tool (`F`, in More tools) drags custom frames or places
   presets (mobile/tablet/desktop/social/A4) at free positions; names

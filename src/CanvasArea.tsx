@@ -105,6 +105,8 @@ const FRAME_PRESETS: { label: string; w: number; h: number }[] = [
 ];
 
 export interface CanvasHandle {
+  /** Create a named frame centered in the visible viewport (Frame Visibility fix). */
+  createFrameAtCenter: (name: string, w: number, h: number) => void;
   startCrop: (id: string) => void;
   fit: () => void;
   zoomBy: (factor: number) => void;
@@ -516,6 +518,47 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
   }, []);
 
   useImperativeHandle(ref, () => ({
+    createFrameAtCenter: (name: string, w: number, h: number) => {
+      const container = containerRef.current;
+      if (!container) return;
+      const v = stateRef.current.view;
+      // Zoom so the new frame fits comfortably, keeping it viewport-centered.
+      const zoom = Math.min(
+        1,
+        container.clientWidth / (w + 140),
+        container.clientHeight / (h + 140),
+        v.zoom
+      );
+      const pcx = (container.clientWidth / 2 - v.offsetX) / v.zoom;
+      const pcy = (container.clientHeight / 2 - v.offsetY) / v.zoom;
+      const els = getElements();
+      const names = els.filter((x) => x.type === 'frame').map((x) => x.label ?? '');
+      const el: SketchElement = {
+        id: uid(),
+        type: 'frame',
+        x: pcx - w / 2,
+        y: pcy - h / 2,
+        width: w,
+        height: h,
+        label: nextName(name, names),
+        strokeColor: '#b9bcc7',
+        fillColor: '#ffffff',
+        strokeWidth: 1,
+        strokeStyle: 'solid',
+        opacity: 100,
+        seed: randomSeed(),
+        locked: false,
+        groupId: null,
+        frameId: null,
+      };
+      updateElements([el, ...els], true); // frames render at the back
+      setSelection([el.id]);
+      setView({
+        zoom,
+        offsetX: container.clientWidth / 2 - pcx * zoom,
+        offsetY: container.clientHeight / 2 - pcy * zoom,
+      });
+    },
     startCrop: (id: string) => {
       setSelection([id]);
       setCropId(id);
