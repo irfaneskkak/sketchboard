@@ -3772,13 +3772,31 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
         const { zoom, offsetX, offsetY } = view;
         const cxs = (fb.x + fb.w / 2) * zoom + offsetX;
         const cys = (fb.y + fb.h / 2) * zoom + offsetY;
+        // The top button sits farther out (52px) so it clears the rotation
+        // handle above the frame (Ghost button overlap fix).
         const spots: { dir: 'top' | 'bottom' | 'left' | 'right'; x: number; y: number; label: string }[] = [
-          { dir: 'top', x: cxs, y: fb.y * zoom + offsetY - 40, label: 'Add frame above' },
+          { dir: 'top', x: cxs, y: fb.y * zoom + offsetY - 52, label: 'Add frame above' },
           { dir: 'bottom', x: cxs, y: (fb.y + fb.h) * zoom + offsetY + 40, label: 'Add frame below' },
           { dir: 'left', x: fb.x * zoom + offsetX - 40, y: cys, label: 'Add frame left' },
           { dir: 'right', x: (fb.x + fb.w) * zoom + offsetX + 40, y: cys, label: 'Add frame right' },
         ];
-        return spots.map((sp) => (
+        // Per-direction safe areas (Ghost button overlap fix): a button must
+        // clear the rulers, the viewport edges, and — for the bottom one —
+        // the floating toolbar. Hidden buttons don't affect the others.
+        const container = containerRef.current;
+        const cw2 = container?.clientWidth ?? 0;
+        const ch2 = container?.clientHeight ?? 0;
+        const GHOST_R = 17; // button radius
+        const SAFE = 8;
+        const visibleSpots = spots.filter((sp) => {
+          if (sp.x - GHOST_R < RULER + SAFE) return false; // left ruler
+          if (sp.y - GHOST_R < RULER + SAFE) return false; // top ruler
+          if (sp.x + GHOST_R > cw2 - SAFE) return false; // right edge
+          const bottomSafe = sp.dir === 'bottom' ? 74 : SAFE; // floating toolbar
+          if (sp.y + GHOST_R > ch2 - bottomSafe) return false;
+          return true;
+        });
+        return visibleSpots.map((sp) => (
           <button
             key={sp.dir}
             className="ghost-plus"
