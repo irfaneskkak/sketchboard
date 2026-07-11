@@ -35,6 +35,18 @@ workspace path contains `:` characters, which break `PATH` lookups.
   Pages are named from their preset ("Instagram Post 1", …) and store their
   canvas size; PDF export emits each page at its own dimensions. Per-page
   portrait/landscape toggle (swaps custom dimensions).
+- **Layers panel** (Layer Implementation) — a Figma-like Layers section
+  below Pages in the left sidebar: frames are collapsible parents holding
+  their contents topmost-first, groups nest as sub-parents, and frameless
+  elements sit under a "Canvas" section. Every element is auto-named at
+  creation per page (Rectangle 1, Circle 1, Triangle 2, Group 1, Clipping
+  Mask 1, …). Rows select (Cmd-click toggles, Shift-click ranges) with
+  two-way canvas sync and auto-expansion of the selected layer's parents,
+  double-click renames (frames rename their label), and each row has an
+  **eye** (hidden layers vanish from canvas, hit-testing, and exports but
+  stay listed dimmed) and a **lock** toggle. Drag rows to reorder within
+  their parent — visually higher = stacked in front — with groups moving
+  as a block. Empty states guide new documents.
 - **Tools** — select, rectangle, ellipse, diamond, line, arrow, pencil, text,
   sticky note, image insert (file picker, drag-drop, or OS paste), eraser
   (splits freehand strokes; deletes other objects — but never frames: it

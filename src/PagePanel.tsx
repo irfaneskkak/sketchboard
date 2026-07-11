@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icons } from './Icons';
+import { LayersPanel } from './LayersPanel';
 import { ensureImagesLoaded, pageRenderBox, renderPageToCanvas } from './render';
 import { pageSize } from './types';
-import type { Doc, Page } from './types';
+import type {
+  SketchElement, Doc, Page } from './types';
 
 const THUMB_WIDTH = 236; // card ≈ 240px with border; centered in the ≥300px panel
 const VIEW_MODE_KEY = 'sketchboard-page-view';
@@ -176,6 +178,12 @@ interface Props {
   onExportPage: (index: number, format: 'png' | 'svg' | 'pdf') => void;
   onReorderPage: (from: number, to: number) => void;
   onRenamePage: (index: number, name: string) => void;
+  /** Layers panel wiring (Layer Implementation). */
+  elements: SketchElement[];
+  selection: string[];
+  onSelectLayers: (ids: string[]) => void;
+  onPatchLayer: (id: string, patch: Partial<SketchElement>) => void;
+  onReorderLayer: (srcId: string, dstId: string, place: 'above' | 'below') => void;
 }
 
 export function PagePanel(props: Props) {
@@ -385,6 +393,14 @@ export function PagePanel(props: Props) {
       <button className="add-page-btn" onClick={props.onAddPage} title="Add page (Appends a new A4 page)">
         {Icons.plus} <span>Add page</span>
       </button>
+
+      <LayersPanel
+        elements={props.elements}
+        selection={props.selection}
+        onSelect={props.onSelectLayers}
+        onPatch={props.onPatchLayer}
+        onReorder={props.onReorderLayer}
+      />
       <div
         className="page-resize-handle"
         title="Drag to resize the Pages panel"

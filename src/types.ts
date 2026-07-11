@@ -55,6 +55,12 @@ export interface SketchElement {
   groupId: string | null;
   /** Immediate children when this element is a group. Frames/artboards must never appear here. */
   childIds?: string[];
+  /** Layer name shown in the Layers panel (auto-assigned at creation,
+   * renamable). Frames use `label` instead. */
+  name?: string;
+  /** Layer visibility (Layers panel eye toggle): false hides the element
+   * from canvas, hit-testing, and exports. */
+  visible?: boolean;
   /** Arrowhead placement (Arrowhead fix): absent = 'end' for arrows and
    * 'none' for lines. */
   arrowHead?: ArrowHead;

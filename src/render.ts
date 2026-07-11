@@ -690,6 +690,7 @@ export function renderElement(
   /** Frame label font size in page units (pass 12/zoom for screen-constant labels). */
   frameLabelSize?: number
 ) {
+  if (el.visible === false) return;
   if (el.type === 'group') return;
   ctx.save();
   ctx.globalAlpha = (el.opacity ?? 100) / 100;

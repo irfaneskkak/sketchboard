@@ -203,6 +203,7 @@ export const Icons = {
   close: svg(<path d="M6 6l12 12M18 6L6 18" />),
   chevronLeft: svg(<path d="M15 5l-7 7 7 7" />),
   chevronRight: svg(<path d="M9 5l7 7-7 7" />),
+  chevronDown: svg(<path d="M5 9l7 7 7-7" />),
   pages: svg(
     <>
       <rect x="4" y="7" width="12" height="14" rx="1" />

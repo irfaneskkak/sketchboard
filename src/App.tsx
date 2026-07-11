@@ -207,6 +207,50 @@ export default function App() {
     [setDoc]
   );
 
+  /** Layers panel: patch a single element (name/label/visible/locked). */
+  const patchLayer = useCallback(
+    (id: string, patch: Partial<SketchElement>) => {
+      updateElements(
+        currentElements().map((el) => (el.id === id ? { ...el, ...patch } : el)),
+        true
+      );
+    },
+    [updateElements]
+  );
+
+  /** Layers panel drag-reorder: move src (with its group subtree) next to
+   * dst within the same parent. 'above' in the list = later in paint order. */
+  const reorderLayer = useCallback(
+    (srcId: string, dstId: string, place: 'above' | 'below') => {
+      const els = currentElements();
+      const src = els.find((e) => e.id === srcId);
+      const dst = els.find((e) => e.id === dstId);
+      if (!src || !dst || srcId === dstId) return;
+      const blockIds = new Set([
+        srcId,
+        ...(isGroupElement(src) ? groupDescendantIds(els, srcId) : []),
+      ]);
+      const block = els.filter((e) => blockIds.has(e.id));
+      const rest = els.filter((e) => !blockIds.has(e.id));
+      const dstIds = new Set([
+        dstId,
+        ...(isGroupElement(dst) ? groupDescendantIds(els, dstId) : []),
+      ]);
+      let first = Infinity;
+      let last = -1;
+      rest.forEach((e, i) => {
+        if (dstIds.has(e.id)) {
+          first = Math.min(first, i);
+          last = Math.max(last, i);
+        }
+      });
+      if (last < 0) return;
+      rest.splice(place === 'above' ? last + 1 : first, 0, ...block);
+      updateElements(updateBoundArrows(rest), true);
+    },
+    [updateElements]
+  );
+
   const selectedElements = doc.pages[doc.currentPage].elements.filter((el) =>
     selection.includes(el.id)
   );
@@ -551,6 +595,7 @@ export default function App() {
     const group: SketchElement = {
       id: gid,
       type: 'group',
+      name: nextName('Group', els.map((x) => x.name ?? '')),
       x: minX,
       y: minY,
       width: maxX - minX,
@@ -676,6 +721,7 @@ export default function App() {
     const contentAbs = { x: image.x + c.x, y: image.y + c.y, w: c.w, h: c.h };
     const masked: SketchElement = {
       ...image,
+      name: nextName('Clipping Mask', els.map((x) => x.name ?? '')),
       x: shape.x,
       y: shape.y,
       width: shape.width,
@@ -1102,6 +1148,7 @@ export default function App() {
           added.push({
             id: uid(),
             type: 'image',
+            name: nextName('Image', [...currentElements(), ...added].map((x) => x.name ?? '')),
             frameId,
             x: cx - w / 2 + offset,
             y: cy - h / 2 + offset,
@@ -1447,6 +1494,14 @@ export default function App() {
           onExportPage={exportPage}
           onReorderPage={reorderPage}
           onRenamePage={renamePage}
+          elements={doc.pages[doc.currentPage].elements}
+          selection={selection}
+          onSelectLayers={(ids) => {
+            setSelection(ids);
+            setToolState('select');
+          }}
+          onPatchLayer={patchLayer}
+          onReorderLayer={reorderLayer}
         />
         <div className="canvas-wrap">
           <CanvasArea

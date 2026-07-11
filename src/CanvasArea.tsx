@@ -644,7 +644,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const threshold = 6 / stateRef.current.view.zoom;
     for (let i = els.length - 1; i >= 0; i--) {
       if (els[i].type === 'group') continue;
-      if (els[i].locked) continue;
+      if (els[i].locked || els[i].visible === false) continue;
       if (isInsideLockedFrame(els[i], els)) continue;
       if (els[i].type === 'frame' && !frameTitleHitTest(els[i], x, y, threshold)) continue;
       if (hiddenByClip(els[i], x, y, els)) continue;
@@ -1008,6 +1008,27 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       width: 0,
       height: 0,
       frameId: type === 'frame' ? null : frameAtPoint(getElements(), x, y)?.id ?? null,
+      name:
+        type === 'frame'
+          ? undefined
+          : nextName(
+              (
+                {
+                  rectangle: 'Rectangle',
+                  ellipse: 'Circle',
+                  diamond: 'Diamond',
+                  triangle: 'Triangle',
+                  line: 'Line',
+                  arrow: 'Arrow',
+                  freedraw: 'Pencil',
+                  text: 'Text',
+                  sticky: 'Sticky',
+                  embed: 'Embed',
+                  image: 'Image',
+                } as Record<string, string>
+              )[type] ?? 'Layer',
+              getElements().map((x) => x.name ?? '')
+            ),
       arrowHead: type === 'arrow' ? d.arrowHead ?? 'end' : undefined,
       strokeColor: needsStroke && d.strokeColor === 'transparent' ? '#1e1e1e' : d.strokeColor,
       fillColor: type === 'sticky' ? d.stickyColor : d.fillColor,
@@ -1169,7 +1190,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
       const el = els[i];
       // Frames are containers: the eraser removes their contents, never the
       // frame itself (delete a frame via selection or its context menu).
-      if (el.type === 'frame') continue;
+      if (el.type === 'frame' || el.visible === false) continue;
       if (el.locked || !hitTest(el, x, y, threshold)) continue;
       if (hiddenByClip(el, x, y, els)) continue;
       if (el.type === 'freedraw' && el.points && el.points.length > 2) {
@@ -2557,7 +2578,7 @@ export const CanvasArea = forwardRef<CanvasHandle, Props>(function CanvasArea(pr
     const els = getElements();
     for (let i = els.length - 1; i >= 0; i--) {
       const el = els[i];
-      if (el.locked) continue;
+      if (el.locked || el.visible === false) continue;
       if (isInsideLockedFrame(el, els)) continue;
       if (hiddenByClip(el, x, y, els)) continue;
       const [lx, ly] = toLocalPoint(el, x, y);

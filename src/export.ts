@@ -196,6 +196,7 @@ function svgArrowhead(el: SketchElement, to: Point, angle: number): string {
 }
 
 function elementToSVG(el: SketchElement): string {
+  if (el.visible === false) return '';
   const b = getBounds(el);
   const parts: string[] = [];
   switch (el.type) {
